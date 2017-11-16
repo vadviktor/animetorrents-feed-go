@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,7 +25,6 @@ const (
 	loginUrl           = "https://animetorrents.me/login.php"
 	torrentsUrl        = "https://animetorrents.me/torrents.php"
 	torrentListUrl     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
-	outputFilename     = "atom.xml"
 	torrentPagesToScan = 10
 )
 
@@ -40,13 +40,17 @@ var regexpCoverImage = regexp.MustCompile(`<img src="https://animetorrents\.me/i
 var regexpScreenShots = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/screenthumb/.*/>`)
 
 func main() {
+	if len(os.Args) < 2 {
+		log.Fatalln("Not enough parameters, missing output file path!")
+	}
+
 	now := time.Now()
 
-	feed := &Feed{
+	feed := &atomFeed{
 		Updated:     now.Format(time.RFC3339),
 		Link:        "http://vadviktor.xyz/rss/animetorrents/rss.xml",
 		Description: "Extracted torrent information for Animetorrents.me",
-		Author: Person{
+		Author: feedPerson{
 			Name:  "Viktor (Ikon) VAD",
 			Email: "vad.viktor@gmail.com",
 			URI:   "https://github.com/vadviktor",
@@ -82,7 +86,7 @@ func main() {
 				continue
 			}
 
-			feedItem := &Entry{
+			feedItem := &feedEntry{
 				Title:    cleanTitle(results["title"]),
 				Link:     results["url"],
 				Category: results["category"],
@@ -99,18 +103,18 @@ func main() {
 	}
 
 	// write out rss file
-	err := ioutil.WriteFile(outputFilename, feed.Build(), 0644)
+	err := ioutil.WriteFile(os.Args[1], feed.Build(), 0644)
 	if err != nil {
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
 	}
 }
 
-func (a *animerTorrents) fillTorrentProfileContent(feedItem *Entry, torrentProfileUrl string) {
+func (a *animerTorrents) fillTorrentProfileContent(feedItem *feedEntry, torrentProfileUrl string) {
 	resp, err := a.client.Get(torrentProfileUrl)
-	defer resp.Body.Close()
 	if err != nil {
 		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
 	}
+	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -132,14 +136,14 @@ func (a *animerTorrents) listPageResponse(pageNumber int) string {
 	req, err := http.NewRequest("GET",
 		fmt.Sprintf(torrentListUrl, a.maxTorrentPages, pageNumber), buf)
 	if err != nil {
-		log.Fatalf("Failed creating new request for page no. %s\n%s\n",
+		log.Fatalf("Failed creating new request for page no. %d\n%s\n",
 			pageNumber, err.Error())
 	}
 	req.Header.Add("X-Requested-With", "XMLHttpRequest")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		log.Fatalf("Failed to GET the page: %s\n%s\n", pageNumber,
+		log.Fatalf("Failed to GET the page: %d\n%s\n", pageNumber,
 			err.Error())
 	}
 	defer resp.Body.Close()
@@ -184,10 +188,10 @@ func (a *animerTorrents) login() {
 	params.Add("username", username)
 	params.Add("password", password)
 	resp, err := a.client.PostForm(loginUrl, params)
-	defer resp.Body.Close()
 	if err != nil {
 		log.Fatalf("Failed to post login data: %s\n", err.Error())
 	}
+	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		log.Fatalf("Failed to read login response body: %s\n", err.Error())
@@ -210,10 +214,10 @@ func (a *animerTorrents) login() {
 func (a *animerTorrents) maxPages() {
 	log.Println("Finding out torrents max page number.")
 	resp, err := a.client.Get(torrentsUrl)
-	defer resp.Body.Close()
 	if err != nil {
 		log.Fatalf("Failed to get the torrents page: %s\n", err.Error())
 	}
+	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
@@ -225,7 +229,7 @@ func (a *animerTorrents) maxPages() {
 	if len(match) > 1 {
 		total, err := strconv.Atoi(match[1])
 		if err != nil {
-			log.Fatalf("Can't convert %s to int.", total)
+			log.Fatalf("Can't convert %d to int.", total)
 		}
 		log.Printf("Max pages figured out: %d.\n", total)
 		a.maxTorrentPages = total
@@ -239,32 +243,30 @@ func cleanTitle(dirtyTitle string) (cleanTitle string) {
 	return
 }
 
-type Feed struct {
-	Author      Person
+type atomFeed struct {
+	Author      feedPerson
 	Title       string
 	Updated     string
 	Description string
 	Link        string
-
-	// Entries
-	Entry []*Entry
+	Entry       []*feedEntry
 }
 
-type Entry struct {
+type feedEntry struct {
 	Title    string
 	Link     string
 	Category string
 	Content  string
 }
 
-type Person struct {
+type feedPerson struct {
 	Name  string
 	URI   string
 	Email string
 }
 
 // Build function will put the feed data together into an Atom feed structure.
-func (f *Feed) Build() []byte {
+func (f *atomFeed) Build() []byte {
 	var b bytes.Buffer
 	b.WriteString(`<?xml version='1.0' encoding='UTF-8'?>
 <rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel>`)
