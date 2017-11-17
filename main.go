@@ -96,7 +96,8 @@ func main() {
 			log.Println("Take 3 seconds break not to hammer the server.")
 			time.Sleep(3 * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
-			a.fillTorrentProfileContent(feedItem, results["url"])
+			a.fillTorrentProfileContent(feedItem, results["url"],
+				results["category"])
 
 			feed.Entry = append(feed.Entry, feedItem)
 		}
@@ -107,9 +108,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
 	}
+
+	log.Println("Script finished.")
 }
 
-func (a *animerTorrents) fillTorrentProfileContent(feedItem *feedEntry, torrentProfileUrl string) {
+func (a *animerTorrents) fillTorrentProfileContent(feedItem *feedEntry, torrentProfileUrl, category string) {
 	resp, err := a.client.Get(torrentProfileUrl)
 	if err != nil {
 		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
@@ -125,8 +128,8 @@ func (a *animerTorrents) fillTorrentProfileContent(feedItem *feedEntry, torrentP
 	coverImageMatch := regexpCoverImage.FindString(string(body))
 	screenshotsMatch := regexpScreenShots.FindString(string(body))
 
-	feedItem.Content = html.EscapeString(fmt.Sprintf("%s\n%s\n%s\n",
-		plotMatch, coverImageMatch, screenshotsMatch))
+	feedItem.Content = html.EscapeString(fmt.Sprintf("%s\n[%s]\n%s\n%s\n",
+		coverImageMatch, category, plotMatch, screenshotsMatch))
 }
 
 func (a *animerTorrents) listPageResponse(pageNumber int) string {
@@ -174,7 +177,7 @@ func (a *animerTorrents) create() {
 
 	a.client = &http.Client{
 		Jar:     jar,
-		Timeout: 10 * time.Second}
+		Timeout: 30 * time.Second}
 }
 
 func (a *animerTorrents) login() {
