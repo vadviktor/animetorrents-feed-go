@@ -45,6 +45,7 @@ var regexpScreenShots = regexp.MustCompile(`<img src="https://animetorrents\.me/
 func main() {
 	s := &slack{}
 	s.create()
+	s.send("Begin to crawl.")
 
 	if len(os.Args) < 2 {
 		s.send("Not enough parameters, missing output file path!")
@@ -118,6 +119,7 @@ func main() {
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
 	}
 
+	s.send("Atom feed is ready.")
 	log.Println("Script finished.")
 }
 
