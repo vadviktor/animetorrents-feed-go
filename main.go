@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sethgrid/pester"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -31,7 +32,7 @@ const (
 )
 
 type animerTorrents struct {
-	client          *http.Client
+	client          *pester.Client
 	maxTorrentPages int
 	slack           *slack
 }
@@ -196,9 +197,10 @@ func (a *animerTorrents) create() {
 		log.Fatal(err)
 	}
 
-	a.client = &http.Client{
-		Jar:     jar,
-		Timeout: 30 * time.Second}
+	a.client = pester.New()
+	a.client.Jar = jar
+	a.client.Timeout = 30 * time.Second
+	a.client.MaxRetries = 5
 }
 
 func (a *animerTorrents) login() {
