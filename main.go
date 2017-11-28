@@ -8,6 +8,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"math/rand"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -17,19 +18,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sethgrid/pester"
 	"golang.org/x/net/publicsuffix"
 )
 
 const (
-	rssLinkUrl         = "http://188.166.8.17/rss.xml"
+	rssLinkUrl         = "https://s3-eu-west-1.amazonaws.com/animetorrents/rss.xml"
 	username           = "vadviktor"
 	password           = "rbT6uUuZDVYPb3SF"
 	loginUrl           = "https://animetorrents.me/login.php"
 	torrentsUrl        = "https://animetorrents.me/torrents.php"
 	torrentListUrl     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
 	torrentPagesToScan = 5
+	antiHammerMaxSleep = 5
 	slackWebhookUrl    = "https://hooks.slack.com/services/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"
+	s3Key              = "AKIAIQGYYHEFEPCG74FQ"
+	s3Secret           = "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"
+	s3Region           = "eu-west-1"
+	s3Bucket           = "animetorrents"
+	s3ObjectName       = "rss.xml"
 )
 
 type animerTorrents struct {
@@ -54,12 +66,9 @@ func main() {
 		log.Fatalln("Not enough parameters, missing output file path!")
 	}
 
-	now := time.Now()
-
 	feed := &atomFeed{
-		Updated:     now.Format(time.RFC3339),
-		Link:        rssLinkUrl,
-		Description: "Extracted torrent information for Animetorrents.me",
+		Updated: time.Now().Format(time.RFC3339),
+		Link:    rssLinkUrl,
 		Author: feedPerson{
 			Name:  "Viktor (Ikon) VAD",
 			Email: "vad.viktor@gmail.com",
@@ -78,8 +87,7 @@ func main() {
 
 	log.Println("Start to parse torrent list pages.")
 	for i := 1; i <= torrentPagesToScan; i++ {
-		log.Println("Take 3 seconds break not to hammer the server.")
-		time.Sleep(3 * time.Second)
+		time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
 
 		body := a.listPageResponse(i)
 
@@ -101,11 +109,11 @@ func main() {
 				Title:    cleanTitle(results["title"]),
 				Link:     results["url"],
 				Category: results["category"],
+				Updated:  time.Now().Format(time.RFC3339),
 			}
 
 			// get the profile for each selected item
-			log.Println("Take 3 seconds break not to hammer the server.")
-			time.Sleep(3 * time.Second)
+			time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
 			a.fillTorrentProfileContent(feedItem, results["url"],
 				results["category"])
@@ -119,6 +127,13 @@ func main() {
 	if err != nil {
 		s.send("Failed to write to output file: %s\n", err.Error())
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
+	}
+	defer os.Remove(os.Args[1])
+
+	err = putOnS3(os.Args[1])
+	if err != nil {
+		s.send("Failure during uploading file to S3: %s\n", err.Error())
+		log.Fatalf("Failure during uploading file to S3: %s\n", err.Error())
 	}
 
 	s.send("Atom feed is ready.")
@@ -279,15 +294,15 @@ func cleanTitle(dirtyTitle string) (cleanTitle string) {
 }
 
 type atomFeed struct {
-	Author      feedPerson
-	Title       string
-	Updated     string
-	Description string
-	Link        string
-	Entry       []*feedEntry
+	Author  feedPerson
+	Title   string
+	Updated string
+	Link    string
+	Entry   []*feedEntry
 }
 
 type feedEntry struct {
+	Updated  string
 	Title    string
 	Link     string
 	Category string
@@ -304,13 +319,12 @@ type feedPerson struct {
 func (f *atomFeed) Build() []byte {
 	var b bytes.Buffer
 	b.WriteString(`<?xml version='1.0' encoding='UTF-8'?>
-<rss xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" version="2.0"><channel>`)
+<feed xmlns="http://www.w3.org/2005/Atom">`)
 	b.WriteString(fmt.Sprintf(`<title>%s</title>`, f.Title))
-	b.WriteString(fmt.Sprintf(`<lastBuildDate>%s</lastBuildDate>`, f.Updated))
-	b.WriteString(fmt.Sprintf(`<atom:link href="%s" rel="self"/>`, f.Link))
-	b.WriteString(fmt.Sprintf(`<description>%s</description>`, f.Description))
+	b.WriteString(fmt.Sprintf(`<updated>%s</updated>`, f.Updated))
+	b.WriteString(fmt.Sprintf(`<id>%s</id>`, f.Link))
+	b.WriteString(fmt.Sprintf(`<link href="%s" rel="self" />`, f.Link))
 	b.WriteString(fmt.Sprintf(`<generator>Go 1.9</generator>`))
-
 	b.WriteString(`<author>`)
 	b.WriteString(fmt.Sprintf(`<name>%s</name>`, f.Author.Name))
 	b.WriteString(fmt.Sprintf(`<uri>%s</uri>`, f.Author.URI))
@@ -318,18 +332,16 @@ func (f *atomFeed) Build() []byte {
 	b.WriteString(`</author>`)
 
 	for _, e := range f.Entry {
-		b.WriteString(fmt.Sprintf(`<item>`))
+		b.WriteString(fmt.Sprintf(`<entry>`))
 		b.WriteString(fmt.Sprintf(`<title>%s</title>`, e.Title))
-		b.WriteString(fmt.Sprintf(`<link>%s</link>`, e.Link))
-		b.WriteString(fmt.Sprintf(`<guid isPermaLink="false">%s</guid>`,
-			e.Link))
-		b.WriteString(fmt.Sprintf(`<category>%s</category>`, e.Category))
-		b.WriteString(fmt.Sprintf(`<description>%s</description>`,
-			e.Content))
-		b.WriteString(fmt.Sprintf(`</item>`))
+		b.WriteString(fmt.Sprintf(`<link href="%s" rel="self" />`, e.Link))
+		b.WriteString(fmt.Sprintf(`<id>%s</id>`, e.Link))
+		b.WriteString(fmt.Sprintf(`<updated>%s</updated>`, e.Updated))
+		b.WriteString(fmt.Sprintf(`<content type="html">%s</content>`, e.Content))
+		b.WriteString(fmt.Sprintf(`</entry>`))
 	}
 
-	b.WriteString(`</channel></rss>`)
+	b.WriteString(`</feed>`)
 
 	return b.Bytes()
 }
@@ -358,4 +370,55 @@ func (s *slack) send(text string, params ...interface{}) {
 		log.Fatalf("Failed to pass text to Slack: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
+}
+
+func putOnS3(filePath string) error {
+	sess, err := session.NewSession(&aws.Config{
+		Region:      aws.String(s3Region),
+		Credentials: credentials.NewStaticCredentials(s3Key, s3Secret, ""),
+	})
+	if err != nil {
+		return err
+	}
+
+	// upload
+	uploader := s3manager.NewUploader(sess)
+
+	file, err := os.Open(filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket:          aws.String(s3Bucket),
+		Key:             aws.String(s3ObjectName),
+		Body:            file,
+		ContentType:     aws.String("application/atom+xml"),
+		ContentEncoding: aws.String("utf-8"),
+	})
+	if err != nil {
+		return err
+	}
+
+	// set to public readonly
+	svc := s3.New(sess)
+	params := &s3.PutObjectAclInput{
+		Bucket:    aws.String(s3Bucket),
+		Key:       aws.String(s3ObjectName),
+		GrantRead: aws.String("uri=http://acs.amazonaws.com/groups/global/AllUsers"),
+	}
+
+	// Set object ACL
+	_, err = svc.PutObjectAcl(params)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func random(min, max int) time.Duration {
+	rand.Seed(time.Now().UnixNano())
+	return time.Duration(rand.Intn(max-min) + min)
 }
