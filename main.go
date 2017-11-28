@@ -17,29 +17,19 @@ import (
 	"strings"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/credentials"
-	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
-	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sethgrid/pester"
 	"golang.org/x/net/publicsuffix"
 )
 
 const (
-	rssLinkUrl         = "https://s3-eu-west-1.amazonaws.com/animetorrents/rss.xml"
+	rssLinkUrl         = "http://188.166.8.17/rss.xml"
 	username           = "vadviktor"
 	password           = "rbT6uUuZDVYPb3SF"
 	loginUrl           = "https://animetorrents.me/login.php"
 	torrentsUrl        = "https://animetorrents.me/torrents.php"
 	torrentListUrl     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
-	torrentPagesToScan = 10
+	torrentPagesToScan = 5
 	slackWebhookUrl    = "https://hooks.slack.com/services/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"
-	s3Key              = "AKIAIQGYYHEFEPCG74FQ"
-	s3Secret           = "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"
-	s3Region           = "eu-west-1"
-	s3Bucket           = "animetorrents"
-	s3ObjectName       = "rss.xml"
 )
 
 type animerTorrents struct {
@@ -129,13 +119,6 @@ func main() {
 	if err != nil {
 		s.send("Failed to write to output file: %s\n", err.Error())
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
-	}
-	defer os.Remove(os.Args[1])
-
-	err = putOnS3(os.Args[1])
-	if err != nil {
-		s.send("Failure during uploading file to S3: %s\n", err.Error())
-		log.Fatalf("Failure during uploading file to S3: %s\n", err.Error())
 	}
 
 	s.send("Atom feed is ready.")
@@ -375,50 +358,4 @@ func (s *slack) send(text string, params ...interface{}) {
 		log.Fatalf("Failed to pass text to Slack: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
-}
-
-func putOnS3(filePath string) error {
-	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(s3Region),
-		Credentials: credentials.NewStaticCredentials(s3Key, s3Secret, ""),
-	})
-	if err != nil {
-		return err
-	}
-
-	// upload
-	uploader := s3manager.NewUploader(sess)
-
-	file, err := os.Open(filePath)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-
-	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket:          aws.String(s3Bucket),
-		Key:             aws.String(s3ObjectName),
-		Body:            file,
-		ContentType:     aws.String("application/xml"),
-		ContentEncoding: aws.String("utf-8"),
-	})
-	if err != nil {
-		return err
-	}
-
-	// set to public readonly
-	svc := s3.New(sess)
-	params := &s3.PutObjectAclInput{
-		Bucket:    aws.String(s3Bucket),
-		Key:       aws.String(s3ObjectName),
-		GrantRead: aws.String("uri=http://acs.amazonaws.com/groups/global/AllUsers"),
-	}
-
-	// Set object ACL
-	_, err = svc.PutObjectAcl(params)
-	if err != nil {
-		return err
-	}
-
-	return nil
 }
