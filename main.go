@@ -28,7 +28,6 @@ import (
 )
 
 const (
-	rssLinkUrl         = "https://s3-eu-west-1.amazonaws.com/animetorrents/rss.xml"
 	username           = "vadviktor"
 	password           = "rbT6uUuZDVYPb3SF"
 	loginUrl           = "https://animetorrents.me/login.php"
@@ -41,7 +40,7 @@ const (
 	s3Secret           = "1c4thNxBCl9MNjdI/43EG/SBaMNciznUN1pSwCHP"
 	s3Region           = "eu-west-1"
 	s3Bucket           = "animetorrents"
-	s3ObjectName       = "rss.xml"
+	s3ObjectName       = "feed.xml"
 )
 
 type animerTorrents struct {
@@ -50,11 +49,41 @@ type animerTorrents struct {
 	slack           *slack
 }
 
-var regexpImgTag = regexp.MustCompile(`<img.+/>`)
-var regexpExcludedCategories = regexp.MustCompile(`(Manga|Novel|Doujin)`)
-var regexpPlot = regexp.MustCompile(`<div id="torDescription">[\s\w\W]*</div>`)
-var regexpCoverImage = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/covers/.*/>`)
-var regexpScreenShots = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/screenthumb/.*/>`)
+type atomFeed struct {
+	Author  feedPerson
+	Title   string
+	Updated string
+	Link    string
+	Entry   []*feedEntry
+}
+
+type feedEntry struct {
+	Updated  string
+	Title    string
+	Link     string
+	Category string
+	Content  string
+}
+
+type feedPerson struct {
+	Name  string
+	URI   string
+	Email string
+}
+
+type slack struct {
+	client *http.Client
+}
+
+var (
+	regexpTorrentRows        = regexp.MustCompile(`(?mU)<tr class="data(Odd|Even)[\s\S]*<a[\s\w\W]+title="(?P<category>.+)"[\s\S]+<a href="(?P<url>.+)"[\s\S]+<strong>(?P<title>.+)</a>`)
+	regexpImgTag             = regexp.MustCompile(`<img.+/>`)
+	regexpExcludedCategories = regexp.MustCompile(`(Manga|Novel|Doujin)`)
+	regexpPlot               = regexp.MustCompile(`<div id="torDescription">[\s\w\W]*</div>`)
+	regexpCoverImage         = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/covers/.*/>`)
+	regexpScreenShots        = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/screenthumb/.*/>`)
+	regexpEntryUpdated       = regexp.MustCompile(`<span class="blogDate">(.*])</span>`)
+)
 
 func main() {
 	s := &slack{}
@@ -68,7 +97,8 @@ func main() {
 
 	feed := &atomFeed{
 		Updated: time.Now().Format(time.RFC3339),
-		Link:    rssLinkUrl,
+		Link: fmt.Sprintf("https://s3-%s.amazonaws.com/%s/%s",
+			s3Region, s3Bucket, s3ObjectName),
 		Author: feedPerson{
 			Name:  "Viktor (Ikon) VAD",
 			Email: "vad.viktor@gmail.com",
@@ -83,15 +113,13 @@ func main() {
 	a.login()
 	a.maxPages()
 
-	regexpTorrentRows := regexp.MustCompile(`(?mU)<tr class="data(Odd|Even)[\s\S]*<a[\s\w\W]+title="(?P<category>.+)"[\s\S]+<a href="(?P<url>.+)"[\s\S]+<strong>(?P<title>.+)</a>`)
-
 	log.Println("Start to parse torrent list pages.")
 	for i := 1; i <= torrentPagesToScan; i++ {
 		time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
 
 		body := a.listPageResponse(i)
 
-		// parse items, select which to get the profile for
+		// Parse items, select which to get the profile for.
 		namedGroups := regexpTorrentRows.SubexpNames()
 		matches := regexpTorrentRows.FindAllStringSubmatch(body, -1)
 		results := make(map[string]string)
@@ -109,20 +137,18 @@ func main() {
 				Title:    cleanTitle(results["title"]),
 				Link:     results["url"],
 				Category: results["category"],
-				Updated:  time.Now().Format(time.RFC3339),
 			}
 
-			// get the profile for each selected item
+			// Get the profile for each selected item.
 			time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
-			a.fillTorrentProfileContent(feedItem, results["url"],
-				results["category"])
+			a.parseProfile(feedItem, results["url"], results["category"])
 
 			feed.Entry = append(feed.Entry, feedItem)
 		}
 	}
 
-	// write out rss file
+	// Write the rss file to disk.
 	err := ioutil.WriteFile(os.Args[1], feed.Build(), 0644)
 	if err != nil {
 		s.send("Failed to write to output file: %s\n", err.Error())
@@ -140,7 +166,9 @@ func main() {
 	log.Println("Script finished.")
 }
 
-func (a *animerTorrents) fillTorrentProfileContent(feedItem *feedEntry, torrentProfileUrl, category string) {
+// parseProfile extracts the content from the torrent profile and fills in the
+// entry fields.
+func (a *animerTorrents) parseProfile(feedItem *feedEntry, torrentProfileUrl, category string) {
 	resp, err := a.client.Get(torrentProfileUrl)
 	if err != nil {
 		a.slack.send("Failed to get the torrent profile page: %s\n", err.Error())
@@ -153,13 +181,30 @@ func (a *animerTorrents) fillTorrentProfileContent(feedItem *feedEntry, torrentP
 		a.slack.send("Failed to read torrent profile response body: %s\n", err.Error())
 		log.Fatalf("Failed to read torrent profile response body: %s\n", err.Error())
 	}
+	bodyText := string(body)
 
-	plotMatch := regexpPlot.FindString(string(body))
-	coverImageMatch := regexpCoverImage.FindString(string(body))
-	screenshotsMatch := regexpScreenShots.FindString(string(body))
-
+	// Content.
+	plotMatch := regexpPlot.FindString(bodyText)
+	coverImageMatch := regexpCoverImage.FindString(bodyText)
+	screenshotsMatch := regexpScreenShots.FindString(bodyText)
 	feedItem.Content = html.EscapeString(fmt.Sprintf("%s\n[%s]\n%s\n%s\n",
 		coverImageMatch, category, plotMatch, screenshotsMatch))
+
+	// Updated.
+	updatedMatch := regexpEntryUpdated.FindStringSubmatch(bodyText)
+	if len(updatedMatch) > 1 && updatedMatch[1] != "" {
+		blogForm := "2 Jan, 2006 [3:04 pm]"
+		t, err := time.Parse(blogForm, updatedMatch[1])
+		if err != nil {
+			a.slack.send("Unable to parse time format: %s\n", err.Error())
+			feedItem.Updated = time.Now().Format(time.RFC3339)
+		} else {
+			feedItem.Updated = t.Format(time.RFC3339)
+		}
+	} else {
+		a.slack.send("Unable to extract upload time data")
+		feedItem.Updated = time.Now().Format(time.RFC3339)
+	}
 }
 
 func (a *animerTorrents) listPageResponse(pageNumber int) string {
@@ -275,7 +320,7 @@ func (a *animerTorrents) maxPages() {
 
 	re := regexp.MustCompile(`ajax/torrents_data\.php\?total=(\d+)&page=1`)
 	match := re.FindStringSubmatch(string(body))
-	if len(match) > 1 {
+	if len(match) > 1 && match[1] != "" {
 		total, err := strconv.Atoi(match[1])
 		if err != nil {
 			a.slack.send("Can't convert %d to int.", total)
@@ -293,29 +338,7 @@ func cleanTitle(dirtyTitle string) (cleanTitle string) {
 	return
 }
 
-type atomFeed struct {
-	Author  feedPerson
-	Title   string
-	Updated string
-	Link    string
-	Entry   []*feedEntry
-}
-
-type feedEntry struct {
-	Updated  string
-	Title    string
-	Link     string
-	Category string
-	Content  string
-}
-
-type feedPerson struct {
-	Name  string
-	URI   string
-	Email string
-}
-
-// Build function will put the feed data together into an Atom feed structure.
+// Build will put the feed data together into an Atom feed structure.
 func (f *atomFeed) Build() []byte {
 	var b bytes.Buffer
 	b.WriteString(`<?xml version='1.0' encoding='UTF-8'?>
@@ -344,10 +367,6 @@ func (f *atomFeed) Build() []byte {
 	b.WriteString(`</feed>`)
 
 	return b.Bytes()
-}
-
-type slack struct {
-	client *http.Client
 }
 
 func (s *slack) create() {
