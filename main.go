@@ -33,7 +33,7 @@ const (
 	loginUrl           = "https://animetorrents.me/login.php"
 	torrentsUrl        = "https://animetorrents.me/torrents.php"
 	torrentListUrl     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
-	torrentPagesToScan = 5
+	torrentPagesToScan = 3
 	antiHammerMaxSleep = 5
 	slackWebhookUrl    = "https://hooks.slack.com/services/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"
 	s3Key              = "AKIAIQGYYHEFEPCG74FQ"
