@@ -28,19 +28,19 @@ import (
 )
 
 const (
-	username           = "vadviktor"
-	password           = "rbT6uUuZDVYPb3SF"
+	loginUsername      = "vadviktor"
+	loginPassword      = "rbT6uUuZDVYPb3SF"
 	loginUrl           = "https://animetorrents.me/login.php"
 	torrentsUrl        = "https://animetorrents.me/torrents.php"
 	torrentListUrl     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
 	torrentPagesToScan = 3
 	antiHammerMaxSleep = 5
 	slackWebhookUrl    = "https://hooks.slack.com/services/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"
-	s3Key              = "AKIAIQGYYHEFEPCG74FQ"
-	s3Secret           = "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"
-	s3Region           = "eu-west-1"
-	s3Bucket           = "animetorrents"
-	s3ObjectName       = "feed.xml"
+	doSpacesKey        = "AKIAIQGYYHEFEPCG74FQ"
+	doSpacesSecret     = "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"
+	doSpacesRegion     = "eu-west-1"
+	doSpacesBucket     = "animetorrents"
+	doSpacesObjectName = "feed.xml"
 )
 
 type animerTorrents struct {
@@ -98,7 +98,7 @@ func main() {
 	feed := &atomFeed{
 		Updated: time.Now().Format(time.RFC3339),
 		Link: fmt.Sprintf("https://s3-%s.amazonaws.com/%s/%s",
-			s3Region, s3Bucket, s3ObjectName),
+			doSpacesRegion, doSpacesBucket, doSpacesObjectName),
 		Author: feedPerson{
 			Name:  "Viktor (Ikon) VAD",
 			Email: "vad.viktor@gmail.com",
@@ -273,8 +273,8 @@ func (a *animerTorrents) login() {
 
 	params := url.Values{}
 	params.Add("form", "login")
-	params.Add("username", username)
-	params.Add("password", password)
+	params.Add("username", loginUsername)
+	params.Add("password", loginPassword)
 	resp, err := a.client.PostForm(loginUrl, params)
 	if err != nil {
 		a.slack.send("Failed to post login data: %s\n", err.Error())
@@ -295,7 +295,7 @@ func (a *animerTorrents) login() {
 	}
 
 	// If I can't see my username, then I am not logged in.
-	if !strings.Contains(string(body), username) {
+	if !strings.Contains(string(body), loginUsername) {
 		a.slack.send("Login failed: can't find username in response body.")
 		log.Fatalln("Login failed: can't find username in response body.")
 	}
@@ -393,8 +393,8 @@ func (s *slack) send(text string, params ...interface{}) {
 
 func putOnS3(filePath string) error {
 	sess, err := session.NewSession(&aws.Config{
-		Region:      aws.String(s3Region),
-		Credentials: credentials.NewStaticCredentials(s3Key, s3Secret, ""),
+		Region:      aws.String(doSpacesRegion),
+		Credentials: credentials.NewStaticCredentials(doSpacesKey, doSpacesSecret, ""),
 	})
 	if err != nil {
 		return err
@@ -410,8 +410,8 @@ func putOnS3(filePath string) error {
 	defer file.Close()
 
 	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket:          aws.String(s3Bucket),
-		Key:             aws.String(s3ObjectName),
+		Bucket:          aws.String(doSpacesBucket),
+		Key:             aws.String(doSpacesObjectName),
 		Body:            file,
 		ContentType:     aws.String("application/atom+xml"),
 		ContentEncoding: aws.String("utf-8"),
@@ -423,8 +423,8 @@ func putOnS3(filePath string) error {
 	// set to public readonly
 	svc := s3.New(sess)
 	params := &s3.PutObjectAclInput{
-		Bucket:    aws.String(s3Bucket),
-		Key:       aws.String(s3ObjectName),
+		Bucket:    aws.String(doSpacesBucket),
+		Key:       aws.String(doSpacesObjectName),
 		GrantRead: aws.String("uri=http://acs.amazonaws.com/groups/global/AllUsers"),
 	}
 
