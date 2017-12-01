@@ -21,7 +21,6 @@ import (
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
-	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sethgrid/pester"
 	"golang.org/x/net/publicsuffix"
@@ -30,17 +29,18 @@ import (
 const (
 	loginUsername      = "vadviktor"
 	loginPassword      = "rbT6uUuZDVYPb3SF"
-	loginUrl           = "https://animetorrents.me/login.php"
-	torrentsUrl        = "https://animetorrents.me/torrents.php"
-	torrentListUrl     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
+	loginURL           = "https://animetorrents.me/login.php"
+	torrentsURL        = "https://animetorrents.me/torrents.php"
+	torrentListURL     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
 	torrentPagesToScan = 3
 	antiHammerMaxSleep = 5
-	slackWebhookUrl    = "https://hooks.slack.com/services/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"
-	doSpacesKey        = "AKIAIQGYYHEFEPCG74FQ"
-	doSpacesSecret     = "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"
+	slackWebhookURL    = "https://hooks.slack.com/services/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"
+	doSpacesKey        = "Y5MQIQZMVDWWC7JW3IFR"
+	doSpacesSecret     = "LwP0cyWHaOejGRzacNHnpZfb/mxsOynvFVEVnfYEOvY"
+	doSpacesEndpoint   = "https://ams3.digitaloceanspaces.com"
 	doSpacesRegion     = "eu-west-1"
-	doSpacesBucket     = "animetorrents"
-	doSpacesObjectName = "feed.xml"
+	doSpacesBucket     = "ikon"
+	doSpacesObjectName = "animetorrents-feed.xml"
 )
 
 type animerTorrents struct {
@@ -129,7 +129,7 @@ func main() {
 			}
 
 			// Skip unwanted categories.
-			if regexpExcludedCategories.MatchString(results["category"]) == true {
+			if regexpExcludedCategories.MatchString(results["category"]) {
 				continue
 			}
 
@@ -168,8 +168,8 @@ func main() {
 
 // parseProfile extracts the content from the torrent profile and fills in the
 // entry fields.
-func (a *animerTorrents) parseProfile(feedItem *feedEntry, torrentProfileUrl, category string) {
-	resp, err := a.client.Get(torrentProfileUrl)
+func (a *animerTorrents) parseProfile(feedItem *feedEntry, torrentProfileURL, category string) {
+	resp, err := a.client.Get(torrentProfileURL)
 	if err != nil {
 		a.slack.send("Failed to get the torrent profile page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
@@ -212,7 +212,7 @@ func (a *animerTorrents) listPageResponse(pageNumber int) string {
 
 	var buf io.Reader
 	req, err := http.NewRequest("GET",
-		fmt.Sprintf(torrentListUrl, a.maxTorrentPages, pageNumber), buf)
+		fmt.Sprintf(torrentListURL, a.maxTorrentPages, pageNumber), buf)
 	if err != nil {
 		a.slack.send("Failed creating new request for page no. %d\n%s\n",
 			pageNumber, err.Error())
@@ -266,7 +266,7 @@ func (a *animerTorrents) create() {
 
 func (a *animerTorrents) login() {
 	log.Println("Logging in.")
-	if _, err := a.client.Get(loginUrl); err != nil {
+	if _, err := a.client.Get(loginURL); err != nil {
 		a.slack.send("Failed to get login page: %s\n", err.Error())
 		log.Fatalf("Failed to get login page: %s\n", err.Error())
 	}
@@ -275,7 +275,7 @@ func (a *animerTorrents) login() {
 	params.Add("form", "login")
 	params.Add("username", loginUsername)
 	params.Add("password", loginPassword)
-	resp, err := a.client.PostForm(loginUrl, params)
+	resp, err := a.client.PostForm(loginURL, params)
 	if err != nil {
 		a.slack.send("Failed to post login data: %s\n", err.Error())
 		log.Fatalf("Failed to post login data: %s\n", err.Error())
@@ -305,7 +305,7 @@ func (a *animerTorrents) login() {
 
 func (a *animerTorrents) maxPages() {
 	log.Println("Finding out torrents max page number.")
-	resp, err := a.client.Get(torrentsUrl)
+	resp, err := a.client.Get(torrentsURL)
 	if err != nil {
 		a.slack.send("Failed to get the torrents page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrents page: %s\n", err.Error())
@@ -384,7 +384,7 @@ func (s *slack) send(text string, params ...interface{}) {
 	}
 
 	p := strings.NewReader(string(payload))
-	resp, err := s.client.Post(slackWebhookUrl, "application/json", p)
+	resp, err := s.client.Post(slackWebhookURL, "application/json", p)
 	if err != nil {
 		log.Fatalf("Failed to pass text to Slack: %s\n", err.Error())
 	}
@@ -393,6 +393,7 @@ func (s *slack) send(text string, params ...interface{}) {
 
 func putOnS3(filePath string) error {
 	sess, err := session.NewSession(&aws.Config{
+		Endpoint:    aws.String(doSpacesEndpoint),
 		Region:      aws.String(doSpacesRegion),
 		Credentials: credentials.NewStaticCredentials(doSpacesKey, doSpacesSecret, ""),
 	})
@@ -413,28 +414,12 @@ func putOnS3(filePath string) error {
 		Bucket:          aws.String(doSpacesBucket),
 		Key:             aws.String(doSpacesObjectName),
 		Body:            file,
+		ACL:             aws.String("public-read"),
 		ContentType:     aws.String("application/atom+xml"),
 		ContentEncoding: aws.String("utf-8"),
 	})
-	if err != nil {
-		return err
-	}
 
-	// set to public readonly
-	svc := s3.New(sess)
-	params := &s3.PutObjectAclInput{
-		Bucket:    aws.String(doSpacesBucket),
-		Key:       aws.String(doSpacesObjectName),
-		GrantRead: aws.String("uri=http://acs.amazonaws.com/groups/global/AllUsers"),
-	}
-
-	// Set object ACL
-	_, err = svc.PutObjectAcl(params)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func random(min, max int) time.Duration {
