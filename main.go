@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
+	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
@@ -43,7 +44,7 @@ const (
 	doSpacesObjectName = "animetorrents-feed.xml"
 )
 
-type animerTorrents struct {
+type animeTorrents struct {
 	client          *pester.Client
 	maxTorrentPages int
 	slack           *slack
@@ -95,6 +96,18 @@ func main() {
 		log.Fatalln("Not enough parameters, missing output file path!")
 	}
 
+	// Parse HTML template once.
+	entryContentTemplate, err := template.New("content").Parse(`
+		<div>{{.CoverImage}}</div>
+		<div>[{{.Category}}]</div>
+		<div>{{.AbsoluteLink}}</div>
+		{{.Plot}}
+		<div>{{.Screenshots}}</div>
+	`)
+	if err != nil {
+		log.Fatalf("Failed to parse template: %s\n", err.Error())
+	}
+
 	feed := &atomFeed{
 		Updated: time.Now().Format(time.RFC3339),
 		Link: fmt.Sprintf("https://s3-%s.amazonaws.com/%s/%s",
@@ -107,7 +120,7 @@ func main() {
 		Title: "Animetorrents.me feed",
 	}
 
-	a := &animerTorrents{}
+	a := &animeTorrents{}
 	a.create()
 	a.slack = s
 	a.login()
@@ -142,14 +155,14 @@ func main() {
 			// Get the profile for each selected item.
 			time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
-			a.parseProfile(feedItem, results["url"], results["category"])
+			a.parseProfile(feedItem, results, entryContentTemplate)
 
 			feed.Entry = append(feed.Entry, feedItem)
 		}
 	}
 
 	// Write the rss file to disk.
-	err := ioutil.WriteFile(os.Args[1], feed.Build(), 0644)
+	err = ioutil.WriteFile(os.Args[1], feed.Build(), 0644)
 	if err != nil {
 		s.send("Failed to write to output file: %s\n", err.Error())
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
@@ -168,8 +181,9 @@ func main() {
 
 // parseProfile extracts the content from the torrent profile and fills in the
 // entry fields.
-func (a *animerTorrents) parseProfile(feedItem *feedEntry, torrentProfileURL, category string) {
-	resp, err := a.client.Get(torrentProfileURL)
+func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[string]string,
+	tpl *template.Template) {
+	resp, err := a.client.Get(torrentRowInfo["url"])
 	if err != nil {
 		a.slack.send("Failed to get the torrent profile page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
@@ -187,8 +201,27 @@ func (a *animerTorrents) parseProfile(feedItem *feedEntry, torrentProfileURL, ca
 	plotMatch := regexpPlot.FindString(bodyText)
 	coverImageMatch := regexpCoverImage.FindString(bodyText)
 	screenshotsMatch := regexpScreenShots.FindString(bodyText)
-	feedItem.Content = html.EscapeString(fmt.Sprintf("%s\n[%s]\n%s\n%s\n",
-		coverImageMatch, category, plotMatch, screenshotsMatch))
+
+	data := struct {
+		CoverImage   string
+		Category     string
+		AbsoluteLink string
+		Plot         string
+		Screenshots  string
+	}{
+		CoverImage:   coverImageMatch,
+		Category:     torrentRowInfo["category"],
+		AbsoluteLink: torrentRowInfo["url"],
+		Plot:         plotMatch,
+		Screenshots:  screenshotsMatch,
+	}
+
+	contentFromTpl := new(bytes.Buffer)
+	err = tpl.Execute(contentFromTpl, data)
+	if err != nil {
+		log.Fatalf("Failed to generate output from template: %s\n", err.Error())
+	}
+	feedItem.Content = contentFromTpl.String()
 
 	// Updated.
 	updatedMatch := regexpEntryUpdated.FindStringSubmatch(bodyText)
@@ -207,7 +240,7 @@ func (a *animerTorrents) parseProfile(feedItem *feedEntry, torrentProfileURL, ca
 	}
 }
 
-func (a *animerTorrents) listPageResponse(pageNumber int) string {
+func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	log.Printf("Getting list page no.: %d\n", pageNumber)
 
 	var buf io.Reader
@@ -249,7 +282,7 @@ func (a *animerTorrents) listPageResponse(pageNumber int) string {
 	return string(body)
 }
 
-func (a *animerTorrents) create() {
+func (a *animeTorrents) create() {
 	log.Println("Creating http client.")
 	options := cookiejar.Options{PublicSuffixList: publicsuffix.List}
 	jar, err := cookiejar.New(&options)
@@ -264,7 +297,7 @@ func (a *animerTorrents) create() {
 	a.client.MaxRetries = 5
 }
 
-func (a *animerTorrents) login() {
+func (a *animeTorrents) login() {
 	log.Println("Logging in.")
 	if _, err := a.client.Get(loginURL); err != nil {
 		a.slack.send("Failed to get login page: %s\n", err.Error())
@@ -303,7 +336,7 @@ func (a *animerTorrents) login() {
 	log.Println("Logged in.")
 }
 
-func (a *animerTorrents) maxPages() {
+func (a *animeTorrents) maxPages() {
 	log.Println("Finding out torrents max page number.")
 	resp, err := a.client.Get(torrentsURL)
 	if err != nil {
