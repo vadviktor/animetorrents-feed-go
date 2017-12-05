@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"html"
 	"io"
@@ -24,6 +23,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sethgrid/pester"
+	"github.com/vadviktor/slack-msg"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -47,7 +47,7 @@ const (
 type animeTorrents struct {
 	client          *pester.Client
 	maxTorrentPages int
-	slack           *slack
+	slack           *slack_msg.Slack
 }
 
 type atomFeed struct {
@@ -72,10 +72,6 @@ type feedPerson struct {
 	Email string
 }
 
-type slack struct {
-	client *http.Client
-}
-
 var (
 	regexpTorrentRows        = regexp.MustCompile(`(?mU)<tr class="data(Odd|Even)[\s\S]*<a[\s\w\W]+title="(?P<category>.+)"[\s\S]+<a href="(?P<url>.+)"[\s\S]+<strong>(?P<title>.+)</a>`)
 	regexpImgTag             = regexp.MustCompile(`<img.+/>`)
@@ -87,12 +83,12 @@ var (
 )
 
 func main() {
-	s := &slack{}
-	s.create()
-	s.send("Begin to crawl.")
+	s := &slack_msg.Slack{}
+	s.Create(slackWebhookURL)
+	s.Send("Begin to crawl.")
 
 	if len(os.Args) < 2 {
-		s.send("Not enough parameters, missing output file path!")
+		s.Send("Not enough parameters, missing output file path!")
 		log.Fatalln("Not enough parameters, missing output file path!")
 	}
 
@@ -164,18 +160,18 @@ func main() {
 	// Write the rss file to disk.
 	err = ioutil.WriteFile(os.Args[1], feed.Build(), 0644)
 	if err != nil {
-		s.send("Failed to write to output file: %s\n", err.Error())
+		s.Send("Failed to write to output file: %s\n", err.Error())
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
 	}
 	defer os.Remove(os.Args[1])
 
 	err = putOnS3(os.Args[1])
 	if err != nil {
-		s.send("Failure during uploading file to S3: %s\n", err.Error())
+		s.Send("Failure during uploading file to S3: %s\n", err.Error())
 		log.Fatalf("Failure during uploading file to S3: %s\n", err.Error())
 	}
 
-	s.send("Atom feed is ready.")
+	s.Send("Atom feed is ready.")
 	log.Println("Script finished.")
 }
 
@@ -185,14 +181,14 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 	tpl *template.Template) {
 	resp, err := a.client.Get(torrentRowInfo["url"])
 	if err != nil {
-		a.slack.send("Failed to get the torrent profile page: %s\n", err.Error())
+		a.slack.Send("Failed to get the torrent profile page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.send("Failed to read torrent profile response body: %s\n", err.Error())
+		a.slack.Send("Failed to read torrent profile response body: %s\n", err.Error())
 		log.Fatalf("Failed to read torrent profile response body: %s\n", err.Error())
 	}
 	bodyText := string(body)
@@ -229,13 +225,13 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 		blogForm := "2 Jan, 2006 [3:04 pm]"
 		t, err := time.Parse(blogForm, updatedMatch[1])
 		if err != nil {
-			a.slack.send("Unable to parse time format: %s\n", err.Error())
+			a.slack.Send("Unable to parse time format: %s\n", err.Error())
 			feedItem.Updated = time.Now().Format(time.RFC3339)
 		} else {
 			feedItem.Updated = t.Format(time.RFC3339)
 		}
 	} else {
-		a.slack.send("Unable to extract upload time data")
+		a.slack.Send("Unable to extract upload time data")
 		feedItem.Updated = time.Now().Format(time.RFC3339)
 	}
 }
@@ -247,7 +243,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	req, err := http.NewRequest("GET",
 		fmt.Sprintf(torrentListURL, a.maxTorrentPages, pageNumber), buf)
 	if err != nil {
-		a.slack.send("Failed creating new request for page no. %d\n%s\n",
+		a.slack.Send("Failed creating new request for page no. %d\n%s\n",
 			pageNumber, err.Error())
 		log.Fatalf("Failed creating new request for page no. %d\n%s\n",
 			pageNumber, err.Error())
@@ -256,7 +252,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		a.slack.send("Failed to GET the page: %d\n%s\n", pageNumber,
+		a.slack.Send("Failed to GET the page: %d\n%s\n", pageNumber,
 			err.Error())
 		log.Fatalf("Failed to GET the page: %d\n%s\n", pageNumber,
 			err.Error())
@@ -266,7 +262,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	log.Printf("Response status code: %d\n", resp.StatusCode)
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.send("Failed to read torrent page response body: %s\n",
+		a.slack.Send("Failed to read torrent page response body: %s\n",
 			err.Error())
 		log.Fatalf("Failed to read torrent page response body: %s\n",
 			err.Error())
@@ -275,7 +271,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	log.Printf("Return body length: %d", len(body))
 
 	if strings.Contains(string(body), "Access Denied!") {
-		a.slack.send("Failed to access torrent page %d", pageNumber)
+		a.slack.Send("Failed to access torrent page %d", pageNumber)
 		log.Fatalf("Failed to access torrent page %d", pageNumber)
 	}
 
@@ -287,7 +283,7 @@ func (a *animeTorrents) create() {
 	options := cookiejar.Options{PublicSuffixList: publicsuffix.List}
 	jar, err := cookiejar.New(&options)
 	if err != nil {
-		a.slack.send(err.Error())
+		a.slack.Send(err.Error())
 		log.Fatal(err)
 	}
 
@@ -300,7 +296,7 @@ func (a *animeTorrents) create() {
 func (a *animeTorrents) login() {
 	log.Println("Logging in.")
 	if _, err := a.client.Get(loginURL); err != nil {
-		a.slack.send("Failed to get login page: %s\n", err.Error())
+		a.slack.Send("Failed to get login page: %s\n", err.Error())
 		log.Fatalf("Failed to get login page: %s\n", err.Error())
 	}
 
@@ -310,26 +306,26 @@ func (a *animeTorrents) login() {
 	params.Add("password", loginPassword)
 	resp, err := a.client.PostForm(loginURL, params)
 	if err != nil {
-		a.slack.send("Failed to post login data: %s\n", err.Error())
+		a.slack.Send("Failed to post login data: %s\n", err.Error())
 		log.Fatalf("Failed to post login data: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.send("Failed to read login response body: %s\n", err.Error())
+		a.slack.Send("Failed to read login response body: %s\n", err.Error())
 		log.Fatalf("Failed to read login response body: %s\n", err.Error())
 	}
 
 	// A known error text upon failed login.
 	if strings.Contains(string(body),
 		"Error: Invalid username or password.") {
-		a.slack.send("Login failed: invalid username or password.")
+		a.slack.Send("Login failed: invalid username or password.")
 		log.Fatalln("Login failed: invalid username or password.")
 	}
 
 	// If I can't see my username, then I am not logged in.
 	if !strings.Contains(string(body), loginUsername) {
-		a.slack.send("Login failed: can't find username in response body.")
+		a.slack.Send("Login failed: can't find username in response body.")
 		log.Fatalln("Login failed: can't find username in response body.")
 	}
 
@@ -340,14 +336,14 @@ func (a *animeTorrents) maxPages() {
 	log.Println("Finding out torrents max page number.")
 	resp, err := a.client.Get(torrentsURL)
 	if err != nil {
-		a.slack.send("Failed to get the torrents page: %s\n", err.Error())
+		a.slack.Send("Failed to get the torrents page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrents page: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.send("Failed to read torrents list response body: %s\n", err.Error())
+		a.slack.Send("Failed to read torrents list response body: %s\n", err.Error())
 		log.Fatalf("Failed to read torrents list response body: %s\n", err.Error())
 	}
 
@@ -356,7 +352,7 @@ func (a *animeTorrents) maxPages() {
 	if len(match) > 1 && match[1] != "" {
 		total, err := strconv.Atoi(match[1])
 		if err != nil {
-			a.slack.send("Can't convert %d to int.", total)
+			a.slack.Send("Can't convert %d to int.", total)
 			log.Fatalf("Can't convert %d to int.", total)
 		}
 		log.Printf("Max pages figured out: %d.\n", total)
@@ -400,28 +396,6 @@ func (f *atomFeed) Build() []byte {
 	b.WriteString(`</feed>`)
 
 	return b.Bytes()
-}
-
-func (s *slack) create() {
-	s.client = &http.Client{
-		Timeout: 30 * time.Second,
-	}
-}
-
-func (s *slack) send(text string, params ...interface{}) {
-	t := map[string]string{"text": fmt.Sprintf(text, params...)}
-	payload, err := json.Marshal(t)
-	if err != nil {
-		log.Fatalf("Failed to create json payload for Slack: %s\n",
-			err.Error())
-	}
-
-	p := strings.NewReader(string(payload))
-	resp, err := s.client.Post(slackWebhookURL, "application/json", p)
-	if err != nil {
-		log.Fatalf("Failed to pass text to Slack: %s\n", err.Error())
-	}
-	defer resp.Body.Close()
 }
 
 func putOnS3(filePath string) error {
