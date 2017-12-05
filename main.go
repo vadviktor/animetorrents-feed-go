@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"html"
-	"html/template"
 	"io"
 	"io/ioutil"
 	"log"
@@ -17,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -98,11 +98,11 @@ func main() {
 
 	// Parse HTML template once.
 	entryContentTemplate, err := template.New("content").Parse(`
-		<div>{{.CoverImage}}</div>
-		<div>[{{.Category}}]</div>
-		<div>{{.AbsoluteLink}}</div>
+		{{.CoverImage}}
+		<p>[{{.Category}}]</p>
+		<p><a href="{{.AbsoluteLink}}" target="blank">{{.AbsoluteLink}}</a></p>
 		{{.Plot}}
-		<div>{{.Screenshots}}</div>
+		{{.Screenshots}}
 	`)
 	if err != nil {
 		log.Fatalf("Failed to parse template: %s\n", err.Error())
@@ -221,7 +221,7 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 	if err != nil {
 		log.Fatalf("Failed to generate output from template: %s\n", err.Error())
 	}
-	feedItem.Content = contentFromTpl.String()
+	feedItem.Content = html.EscapeString(contentFromTpl.String())
 
 	// Updated.
 	updatedMatch := regexpEntryUpdated.FindStringSubmatch(bodyText)
