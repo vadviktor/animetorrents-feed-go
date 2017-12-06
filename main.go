@@ -42,6 +42,7 @@ const (
 	doSpacesRegion     = "eu-west-1"
 	doSpacesBucket     = "ikon"
 	doSpacesObjectName = "animetorrents-feed.xml"
+	lockFile           = "./animetorrents.lock"
 )
 
 type animeTorrents struct {
@@ -83,6 +84,14 @@ var (
 )
 
 func main() {
+	// Locking.
+	if _, err := os.Stat(lockFile); err == nil {
+		log.Fatalln("Another instance is locking this run.")
+	}
+	// Not locking.
+	ioutil.WriteFile(lockFile, []byte(strconv.Itoa(os.Getpid())), os.ModeExclusive)
+	defer os.Remove(lockFile)
+
 	s := &slack_msg.Slack{}
 	s.Create(slackWebhookURL)
 	s.Send("Begin to crawl.")
