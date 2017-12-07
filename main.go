@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"flag"
 	"fmt"
 	"html"
 	"io"
@@ -45,12 +46,14 @@ const (
 	lockFile           = "./animetorrents.lock"
 )
 
+// animeTorrents is the crawler itself.
 type animeTorrents struct {
 	client          *pester.Client
 	maxTorrentPages int
 	slack           *slack_msg.Slack
 }
 
+// atomFeed is the main body of the Atom feed structure.
 type atomFeed struct {
 	Author  feedPerson
 	Title   string
@@ -59,6 +62,7 @@ type atomFeed struct {
 	Entry   []*feedEntry
 }
 
+// feedEntry represents a single article in a feed.
 type feedEntry struct {
 	Updated  string
 	Title    string
@@ -67,6 +71,7 @@ type feedEntry struct {
 	Content  string
 }
 
+// feedPerson is
 type feedPerson struct {
 	Name  string
 	URI   string
@@ -81,7 +86,24 @@ var (
 	regexpCoverImage         = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/covers/.*/>`)
 	regexpScreenShots        = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/screenthumb/.*/>`)
 	regexpEntryUpdated       = regexp.MustCompile(`<span class="blogDate">(.*])</span>`)
+	tempFeedFile             string
 )
+
+func init() {
+	flag.Usage = func() {
+		u := `Logs into Animetorrents.me and gets the last 3 pages of torrents,
+extracts their data and structures them in an Atom feed.
+That Atom feed is then uploaded to DigitalOcean Spaces.
+
+Parameters:
+
+`
+		fmt.Fprint(os.Stderr, u)
+		flag.PrintDefaults()
+	}
+	flag.StringVar(&tempFeedFile, "temp", "./rss.xml", "Temporary XML file.")
+	flag.Parse()
+}
 
 func main() {
 	// Locking.
@@ -95,11 +117,6 @@ func main() {
 	s := &slack_msg.Slack{}
 	s.Create(slackWebhookURL)
 	s.Send("Begin to crawl.")
-
-	if len(os.Args) < 2 {
-		s.Send("Not enough parameters, missing output file path!")
-		log.Fatalln("Not enough parameters, missing output file path!")
-	}
 
 	// Parse HTML template once.
 	entryContentTemplate, err := template.New("content").Parse(`
@@ -167,14 +184,14 @@ func main() {
 	}
 
 	// Write the rss file to disk.
-	err = ioutil.WriteFile(os.Args[1], feed.Build(), 0644)
+	err = ioutil.WriteFile(tempFeedFile, feed.Build(), 0644)
 	if err != nil {
 		s.Send("Failed to write to output file: %s\n", err.Error())
 		log.Fatalf("Failed to write to output file: %s\n", err.Error())
 	}
-	defer os.Remove(os.Args[1])
+	defer os.Remove(tempFeedFile)
 
-	err = putOnS3(os.Args[1])
+	err = putOnS3(tempFeedFile)
 	if err != nil {
 		s.Send("Failure during uploading file to S3: %s\n", err.Error())
 		log.Fatalf("Failure during uploading file to S3: %s\n", err.Error())
