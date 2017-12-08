@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+echo "Building for linux."
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags "-s -w" -a -o ./builds/linux/animetorrents-feed
+
+echo "Building for armv7."
+CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go build -ldflags "-s -w" -a -o ./builds/armv7/animetorrents-feed
+
+echo "Done."

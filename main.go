@@ -13,6 +13,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,26 +25,15 @@ import (
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sethgrid/pester"
+	"github.com/spf13/viper"
 	"github.com/vadviktor/slack-msg"
 	"golang.org/x/net/publicsuffix"
 )
 
 const (
-	loginUsername      = "vadviktor"
-	loginPassword      = "rbT6uUuZDVYPb3SF"
-	loginURL           = "https://animetorrents.me/login.php"
-	torrentsURL        = "https://animetorrents.me/torrents.php"
-	torrentListURL     = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
-	torrentPagesToScan = 3
-	antiHammerMaxSleep = 5
-	slackWebhookURL    = "https://hooks.slack.com/services/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"
-	doSpacesKey        = "Y5MQIQZMVDWWC7JW3IFR"
-	doSpacesSecret     = "LwP0cyWHaOejGRzacNHnpZfb/mxsOynvFVEVnfYEOvY"
-	doSpacesEndpoint   = "https://ams3.digitaloceanspaces.com"
-	doSpacesRegion     = "eu-west-1"
-	doSpacesBucket     = "ikon"
-	doSpacesObjectName = "animetorrents-feed.xml"
-	lockFile           = "./animetorrents.lock"
+	loginURL       = "https://animetorrents.me/login.php"
+	torrentsURL    = "https://animetorrents.me/torrents.php"
+	torrentListURL = "https://animetorrents.me/ajax/torrents_data.php?total=%d&page=%d"
 )
 
 // animeTorrents is the crawler itself.
@@ -86,27 +76,34 @@ var (
 	regexpCoverImage         = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/covers/.*/>`)
 	regexpScreenShots        = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/screenthumb/.*/>`)
 	regexpEntryUpdated       = regexp.MustCompile(`<span class="blogDate">(.*])</span>`)
-	tempFeedFile             string
+	fileBaseName             string
 )
 
 func init() {
+	fileBaseName = strings.TrimRight(filepath.Base(os.Args[0]), filepath.Ext(os.Args[0]))
+
 	flag.Usage = func() {
 		u := `Logs into Animetorrents.me and gets the last 3 pages of torrents,
 extracts their data and structures them in an Atom feed.
 That Atom feed is then uploaded to DigitalOcean Spaces.
 
-Parameters:
-
+Create a config file named animetorrents-feed.json by filling in what is defined in its sample file.
 `
 		fmt.Fprint(os.Stderr, u)
-		flag.PrintDefaults()
 	}
-	flag.StringVar(&tempFeedFile, "temp", "./rss.xml", "Temporary XML file.")
 	flag.Parse()
+
+	viper.SetConfigName("animetorrents-feed")
+	viper.AddConfigPath(".")
+	err := viper.ReadInConfig()
+	if err != nil {
+		log.Fatalf("%s\n", err.Error())
+	}
 }
 
 func main() {
 	// Locking.
+	lockFile := fmt.Sprintf("./%s.lock", fileBaseName)
 	if _, err := os.Stat(lockFile); err == nil {
 		log.Fatalln("Another instance is locking this run.")
 	}
@@ -115,7 +112,7 @@ func main() {
 	defer os.Remove(lockFile)
 
 	s := &slack_msg.Slack{}
-	s.Create(slackWebhookURL)
+	s.Create(viper.GetString("slackWebhookURL"))
 	s.Send("Begin to crawl.")
 
 	// Parse HTML template once.
@@ -133,7 +130,9 @@ func main() {
 	feed := &atomFeed{
 		Updated: time.Now().Format(time.RFC3339),
 		Link: fmt.Sprintf("https://s3-%s.amazonaws.com/%s/%s",
-			doSpacesRegion, doSpacesBucket, doSpacesObjectName),
+			viper.GetString("doSpacesRegion"),
+			viper.GetString("doSpacesBucket"),
+			viper.GetString("doSpacesObjectName")),
 		Author: feedPerson{
 			Name:  "Viktor (Ikon) VAD",
 			Email: "vad.viktor@gmail.com",
@@ -149,8 +148,8 @@ func main() {
 	a.maxPages()
 
 	log.Println("Start to parse torrent list pages.")
-	for i := 1; i <= torrentPagesToScan; i++ {
-		time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
+	for i := 1; i <= viper.GetInt("torrentPagesToScan"); i++ {
+		time.Sleep(random(1, viper.GetInt("antiHammerMaxSleep")) * time.Second)
 
 		body := a.listPageResponse(i)
 
@@ -175,7 +174,7 @@ func main() {
 			}
 
 			// Get the profile for each selected item.
-			time.Sleep(random(1, antiHammerMaxSleep) * time.Second)
+			time.Sleep(random(1, viper.GetInt("antiHammerMaxSleep")) * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
 			a.parseProfile(feedItem, results, entryContentTemplate)
 
@@ -184,6 +183,7 @@ func main() {
 	}
 
 	// Write the rss file to disk.
+	tempFeedFile := fmt.Sprintf("./%s.xml", fileBaseName)
 	err = ioutil.WriteFile(tempFeedFile, feed.Build(), 0644)
 	if err != nil {
 		s.Send("Failed to write to output file: %s\n", err.Error())
@@ -328,8 +328,8 @@ func (a *animeTorrents) login() {
 
 	params := url.Values{}
 	params.Add("form", "login")
-	params.Add("username", loginUsername)
-	params.Add("password", loginPassword)
+	params.Add("username", viper.GetString("loginUsername"))
+	params.Add("password", viper.GetString("loginPassword"))
 	resp, err := a.client.PostForm(loginURL, params)
 	if err != nil {
 		a.slack.Send("Failed to post login data: %s\n", err.Error())
@@ -350,7 +350,7 @@ func (a *animeTorrents) login() {
 	}
 
 	// If I can't see my username, then I am not logged in.
-	if !strings.Contains(string(body), loginUsername) {
+	if !strings.Contains(string(body), viper.GetString("loginUsername")) {
 		a.slack.Send("Login failed: can't find username in response body.")
 		log.Fatalln("Login failed: can't find username in response body.")
 	}
@@ -426,9 +426,12 @@ func (f *atomFeed) Build() []byte {
 
 func putOnS3(filePath string) error {
 	sess, err := session.NewSession(&aws.Config{
-		Endpoint:    aws.String(doSpacesEndpoint),
-		Region:      aws.String(doSpacesRegion),
-		Credentials: credentials.NewStaticCredentials(doSpacesKey, doSpacesSecret, ""),
+		Endpoint: aws.String(viper.GetString("doSpacesEndpoint")),
+		Region:   aws.String(viper.GetString("doSpacesRegion")),
+		Credentials: credentials.NewStaticCredentials(
+			viper.GetString("doSpacesKey"),
+			viper.GetString("doSpacesSecret"),
+			""),
 	})
 	if err != nil {
 		return err
@@ -444,8 +447,8 @@ func putOnS3(filePath string) error {
 	defer file.Close()
 
 	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket:          aws.String(doSpacesBucket),
-		Key:             aws.String(doSpacesObjectName),
+		Bucket:          aws.String(viper.GetString("doSpacesBucket")),
+		Key:             aws.String(viper.GetString("doSpacesObjectName")),
 		Body:            file,
 		ACL:             aws.String("public-read"),
 		ContentType:     aws.String("application/atom+xml"),
