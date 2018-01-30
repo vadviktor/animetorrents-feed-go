@@ -26,7 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/sethgrid/pester"
 	"github.com/spf13/viper"
-	"github.com/vadviktor/slack-msg"
+	"github.com/vadviktor/telegram-msg"
 	"golang.org/x/net/publicsuffix"
 )
 
@@ -40,7 +40,7 @@ const (
 type animeTorrents struct {
 	client          *pester.Client
 	maxTorrentPages int
-	slack           *slack_msg.Slack
+	telegram        *telegram_msg.Telegram
 }
 
 // atomFeed is the main body of the Atom feed structure.
@@ -111,9 +111,9 @@ func main() {
 	ioutil.WriteFile(lockFile, []byte(strconv.Itoa(os.Getpid())), os.ModeExclusive)
 	defer os.Remove(lockFile)
 
-	s := &slack_msg.Slack{}
-	s.Create(viper.GetString("slackWebhookURL"))
-	s.Send("Begin to crawl.")
+	s := &telegram_msg.Telegram{}
+	s.Create(viper.GetString("botToken"), viper.GetInt("targetId"))
+	s.SendSilent("Begin to crawl.")
 
 	// Parse HTML template once.
 	entryContentTemplate, err := template.New("content").Parse(`
@@ -143,7 +143,7 @@ func main() {
 
 	a := &animeTorrents{}
 	a.create()
-	a.slack = s
+	a.telegram = s
 	a.login()
 	a.maxPages()
 
@@ -197,7 +197,7 @@ func main() {
 		log.Fatalf("Failure during uploading file to S3: %s\n", err.Error())
 	}
 
-	s.Send("Atom feed is ready.")
+	s.SendSilent("Atom feed is ready.")
 	log.Println("Script finished.")
 }
 
@@ -207,14 +207,14 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 	tpl *template.Template) {
 	resp, err := a.client.Get(torrentRowInfo["url"])
 	if err != nil {
-		a.slack.Send("Failed to get the torrent profile page: %s\n", err.Error())
+		a.telegram.Send("Failed to get the torrent profile page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.Send("Failed to read torrent profile response body: %s\n", err.Error())
+		a.telegram.Send("Failed to read torrent profile response body: %s\n", err.Error())
 		log.Fatalf("Failed to read torrent profile response body: %s\n", err.Error())
 	}
 	bodyText := string(body)
@@ -251,13 +251,13 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 		blogForm := "2 Jan, 2006 [3:04 pm]"
 		t, err := time.Parse(blogForm, updatedMatch[1])
 		if err != nil {
-			a.slack.Send("Unable to parse time format: %s\n", err.Error())
+			a.telegram.Send("Unable to parse time format: %s\n", err.Error())
 			feedItem.Updated = time.Now().Format(time.RFC3339)
 		} else {
 			feedItem.Updated = t.Format(time.RFC3339)
 		}
 	} else {
-		a.slack.Send("Unable to extract upload time data")
+		a.telegram.Send("Unable to extract upload time data")
 		feedItem.Updated = time.Now().Format(time.RFC3339)
 	}
 }
@@ -269,7 +269,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	req, err := http.NewRequest("GET",
 		fmt.Sprintf(torrentListURL, a.maxTorrentPages, pageNumber), buf)
 	if err != nil {
-		a.slack.Send("Failed creating new request for page no. %d\n%s\n",
+		a.telegram.Send("Failed creating new request for page no. %d\n%s\n",
 			pageNumber, err.Error())
 		log.Fatalf("Failed creating new request for page no. %d\n%s\n",
 			pageNumber, err.Error())
@@ -278,7 +278,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		a.slack.Send("Failed to GET the page: %d\n%s\n", pageNumber,
+		a.telegram.Send("Failed to GET the page: %d\n%s\n", pageNumber,
 			err.Error())
 		log.Fatalf("Failed to GET the page: %d\n%s\n", pageNumber,
 			err.Error())
@@ -288,7 +288,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	log.Printf("Response status code: %d\n", resp.StatusCode)
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.Send("Failed to read torrent page response body: %s\n",
+		a.telegram.Send("Failed to read torrent page response body: %s\n",
 			err.Error())
 		log.Fatalf("Failed to read torrent page response body: %s\n",
 			err.Error())
@@ -297,7 +297,7 @@ func (a *animeTorrents) listPageResponse(pageNumber int) string {
 	log.Printf("Return body length: %d", len(body))
 
 	if strings.Contains(string(body), "Access Denied!") {
-		a.slack.Send("Failed to access torrent page %d", pageNumber)
+		a.telegram.Send("Failed to access torrent page %d", pageNumber)
 		log.Fatalf("Failed to access torrent page %d", pageNumber)
 	}
 
@@ -309,7 +309,7 @@ func (a *animeTorrents) create() {
 	options := cookiejar.Options{PublicSuffixList: publicsuffix.List}
 	jar, err := cookiejar.New(&options)
 	if err != nil {
-		a.slack.Send(err.Error())
+		a.telegram.Send(err.Error())
 		log.Fatal(err)
 	}
 
@@ -322,7 +322,7 @@ func (a *animeTorrents) create() {
 func (a *animeTorrents) login() {
 	log.Println("Logging in.")
 	if _, err := a.client.Get(loginURL); err != nil {
-		a.slack.Send("Failed to get login page: %s\n", err.Error())
+		a.telegram.Send("Failed to get login page: %s\n", err.Error())
 		log.Fatalf("Failed to get login page: %s\n", err.Error())
 	}
 
@@ -332,26 +332,26 @@ func (a *animeTorrents) login() {
 	params.Add("password", viper.GetString("loginPassword"))
 	resp, err := a.client.PostForm(loginURL, params)
 	if err != nil {
-		a.slack.Send("Failed to post login data: %s\n", err.Error())
+		a.telegram.Send("Failed to post login data: %s\n", err.Error())
 		log.Fatalf("Failed to post login data: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.Send("Failed to read login response body: %s\n", err.Error())
+		a.telegram.Send("Failed to read login response body: %s\n", err.Error())
 		log.Fatalf("Failed to read login response body: %s\n", err.Error())
 	}
 
 	// A known error text upon failed login.
 	if strings.Contains(string(body),
 		"Error: Invalid username or password.") {
-		a.slack.Send("Login failed: invalid username or password.")
+		a.telegram.Send("Login failed: invalid username or password.")
 		log.Fatalln("Login failed: invalid username or password.")
 	}
 
 	// If I can't see my username, then I am not logged in.
 	if !strings.Contains(string(body), viper.GetString("loginUsername")) {
-		a.slack.Send("Login failed: can't find username in response body.")
+		a.telegram.Send("Login failed: can't find username in response body.")
 		log.Fatalln("Login failed: can't find username in response body.")
 	}
 
@@ -362,14 +362,14 @@ func (a *animeTorrents) maxPages() {
 	log.Println("Finding out torrents max page number.")
 	resp, err := a.client.Get(torrentsURL)
 	if err != nil {
-		a.slack.Send("Failed to get the torrents page: %s\n", err.Error())
+		a.telegram.Send("Failed to get the torrents page: %s\n", err.Error())
 		log.Fatalf("Failed to get the torrents page: %s\n", err.Error())
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.slack.Send("Failed to read torrents list response body: %s\n", err.Error())
+		a.telegram.Send("Failed to read torrents list response body: %s\n", err.Error())
 		log.Fatalf("Failed to read torrents list response body: %s\n", err.Error())
 	}
 
@@ -378,7 +378,7 @@ func (a *animeTorrents) maxPages() {
 	if len(match) > 1 && match[1] != "" {
 		total, err := strconv.Atoi(match[1])
 		if err != nil {
-			a.slack.Send("Can't convert %d to int.", total)
+			a.telegram.Send("Can't convert %d to int.", total)
 			log.Fatalf("Can't convert %d to int.", total)
 		}
 		log.Printf("Max pages figured out: %d.\n", total)

@@ -3,11 +3,12 @@
   "loginPassword": "",
   "torrentPagesToScan": 3,
   "antiHammerMaxSleep": 5,
-  "slackWebhookURL": "https://hooks.slack.com/services/bla/bla/bla",
+  "botToken": "",
+  "targetId": 0,
   "doSpacesKey": "",
   "doSpacesSecret": "",
   "doSpacesEndpoint": "https://ams3.digitaloceanspaces.com",
   "doSpacesRegion": "eu-west-1",
   "doSpacesBucket": "",
-  "doSpacesObjectName": "feed.xml",
+  "doSpacesObjectName": "feed.xml"
 }
