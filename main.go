@@ -68,6 +68,12 @@ type feedPerson struct {
 	Email string
 }
 
+type Error struct {
+	msg string
+}
+
+func (e *Error) Error() string { return e.msg }
+
 var (
 	regexpTorrentRows        = regexp.MustCompile(`(?mU)<tr class="data(Odd|Even)[\s\S]*<a[\s\w\W]+title="(?P<category>.+)"[\s\S]+<a href="(?P<url>.+)"[\s\S]+<strong>(?P<title>.+)</a>`)
 	regexpImgTag             = regexp.MustCompile(`<img.+/>`)
@@ -114,7 +120,7 @@ func main() {
 
 	s := &telegram_msg.Telegram{}
 	s.Create(viper.GetString("botToken"), viper.GetInt("targetId"))
-	s.SendSilent("Begin to crawl.")
+	//s.SendSilent("Begin to crawl.")
 
 	// Parse HTML template once.
 	entryContentTemplate, err := template.New("content").Parse(`
@@ -125,7 +131,8 @@ func main() {
 		{{.Screenshots}}
 	`)
 	if err != nil {
-		log.Fatalf("Failed to parse template: %s\n", err.Error())
+		log.Printf("Failed to parse template: %s\n", err.Error())
+		return
 	}
 
 	feed := &atomFeed{
@@ -143,16 +150,38 @@ func main() {
 	}
 
 	a := &animeTorrents{}
-	a.create()
+	err = a.create()
+	if err != nil {
+		log.Printf("%s\n", err.Error())
+		s.Send(err.Error())
+		return
+	}
+
 	a.telegram = s
-	a.login()
-	a.maxPages()
+	err = a.login()
+	if err != nil {
+		log.Printf("%s\n", err.Error())
+		s.Send(err.Error())
+		return
+	}
+
+	err = a.maxPages()
+	if err != nil {
+		log.Printf("%s\n", err.Error())
+		s.Send(err.Error())
+		return
+	}
 
 	log.Println("Start to parse torrent list pages.")
 	for i := 1; i <= viper.GetInt("torrentPagesToScan"); i++ {
 		time.Sleep(random(1, viper.GetInt("antiHammerMaxSleep")) * time.Second)
 
-		body := a.listPageResponse(i)
+		body, err := a.listPageResponse(i)
+		if err != nil {
+			log.Printf("%s\n", err.Error())
+			a.telegram.Send(err.Error())
+			return
+		}
 
 		// Parse items, select which to get the profile for.
 		namedGroups := regexpTorrentRows.SubexpNames()
@@ -177,7 +206,12 @@ func main() {
 			// Get the profile for each selected item.
 			time.Sleep(random(1, viper.GetInt("antiHammerMaxSleep")) * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
-			a.parseProfile(feedItem, results, entryContentTemplate)
+			err := a.parseProfile(feedItem, results, entryContentTemplate)
+			if err != nil {
+				log.Printf("%s\n", err.Error())
+				a.telegram.Send(err.Error())
+				return
+			}
 
 			feed.Entry = append(feed.Entry, feedItem)
 		}
@@ -188,14 +222,16 @@ func main() {
 	err = ioutil.WriteFile(tempFeedFile, feed.Build(), 0644)
 	if err != nil {
 		s.Send(fmt.Sprintf("Failed to write to output file: %s\n", err.Error()))
-		log.Fatalf("Failed to write to output file: %s\n", err.Error())
+		log.Printf("Failed to write to output file: %s\n", err.Error())
+		return
 	}
 	defer os.Remove(tempFeedFile)
 
 	err = putOnS3(tempFeedFile)
 	if err != nil {
 		s.Send(fmt.Sprintf("Failure during uploading file to S3: %s\n", err.Error()))
-		log.Fatalf("Failure during uploading file to S3: %s\n", err.Error())
+		log.Printf("Failure during uploading file to S3: %s\n", err.Error())
+		return
 	}
 
 	s.SendSilent("Atom feed is ready.")
@@ -205,19 +241,19 @@ func main() {
 // parseProfile extracts the content from the torrent profile and fills in the
 // entry fields.
 func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[string]string,
-	tpl *template.Template) {
+	tpl *template.Template) error {
 	resp, err := a.client.Get(torrentRowInfo["url"])
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
-			"Failed to get the torrent profile page: %s\n", err.Error()))
-		log.Fatalf("Failed to get the torrent profile page: %s\n", err.Error())
+		return &Error{msg: fmt.Sprintf(
+			"Failed to get the torrent profile page: %s\n", err.Error())}
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf("Failed to read torrent profile response body: %s\n", err.Error()))
-		log.Fatalf("Failed to read torrent profile response body: %s\n", err.Error())
+		return &Error{msg: fmt.Sprintf(
+			"Failed to read torrent profile response body: %s\n",
+			err.Error())}
 	}
 	bodyText := string(body)
 
@@ -243,8 +279,9 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 	contentFromTpl := new(bytes.Buffer)
 	err = tpl.Execute(contentFromTpl, data)
 	if err != nil {
-		log.Fatalf("Failed to generate output from template: %s\n",
-			err.Error())
+		return &Error{msg: fmt.Sprintf(
+			"Failed to generate output from template: %s\n",
+			err.Error())}
 	}
 	feedItem.Content = html.EscapeString(contentFromTpl.String())
 
@@ -263,75 +300,71 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 		a.telegram.Send("Unable to extract upload time data")
 		feedItem.Updated = time.Now().Format(time.RFC3339)
 	}
+
+	return nil
 }
 
-func (a *animeTorrents) listPageResponse(pageNumber int) string {
+func (a *animeTorrents) listPageResponse(pageNumber int) (string, error) {
 	log.Printf("Getting list page no.: %d\n", pageNumber)
 
 	var buf io.Reader
 	req, err := http.NewRequest("GET",
 		fmt.Sprintf(torrentListURL, a.maxTorrentPages, pageNumber), buf)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
+		return "", &Error{msg: fmt.Sprintf(
 			"Failed creating new request for page no. %d\n%s\n",
-			pageNumber, err.Error()))
-		log.Fatalf("Failed creating new request for page no. %d\n%s\n",
-			pageNumber, err.Error())
+			pageNumber, err.Error())}
 	}
 	req.Header.Add("X-Requested-With", "XMLHttpRequest")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
+		return "", &Error{msg: fmt.Sprintf(
 			"Failed to GET the page: %d\n%s\n", pageNumber,
-			err.Error()))
-		log.Fatalf("Failed to GET the page: %d\n%s\n", pageNumber,
-			err.Error())
+			err.Error())}
 	}
 	defer resp.Body.Close()
 
 	log.Printf("Response status code: %d\n", resp.StatusCode)
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
+		return "", &Error{msg: fmt.Sprintf(
 			"Failed to read torrent page response body: %s\n",
-			err.Error()))
-		log.Fatalf("Failed to read torrent page response body: %s\n",
-			err.Error())
+			err.Error())}
 	}
 
 	log.Printf("Return body length: %d", len(body))
 
 	if strings.Contains(string(body), "Access Denied!") {
-		a.telegram.Send(fmt.Sprintf("Failed to access torrent page %d",
-			pageNumber))
-		log.Fatalf("Failed to access torrent page %d", pageNumber)
+		return "", &Error{msg: fmt.Sprintf("Failed to access torrent page %d",
+			pageNumber)}
 	}
 
-	return string(body)
+	return string(body), nil
 }
 
-func (a *animeTorrents) create() {
+func (a *animeTorrents) create() error {
 	log.Println("Creating http client.")
 	options := cookiejar.Options{PublicSuffixList: publicsuffix.List}
 	jar, err := cookiejar.New(&options)
 	if err != nil {
-		a.telegram.Send(err.Error())
-		log.Fatal(err)
+		return &Error{msg: fmt.Sprintf("Failed to create cookiejar: %s",
+			err.Error())}
 	}
 
 	a.client = pester.New()
 	a.client.Jar = jar
 	a.client.Timeout = 30 * time.Second
 	a.client.MaxRetries = 5
+
+	return nil
 }
 
-func (a *animeTorrents) login() {
+func (a *animeTorrents) login() error {
 	log.Println("Logging in.")
 	if _, err := a.client.Get(loginURL); err != nil {
-		a.telegram.Send(fmt.Sprintf("Failed to get login page: %s\n",
-			err.Error()))
-		log.Fatalf("Failed to get login page: %s\n", err.Error())
+		return &Error{msg: fmt.Sprintf("Failed to get login page: %s\n",
+			err.Error())}
 	}
 
 	params := url.Values{}
@@ -340,51 +373,47 @@ func (a *animeTorrents) login() {
 	params.Add("password", viper.GetString("loginPassword"))
 	resp, err := a.client.PostForm(loginURL, params)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf("Failed to post login data: %s\n",
-			err.Error()))
-		log.Fatalf("Failed to post login data: %s\n", err.Error())
+		return &Error{msg: fmt.Sprintf("Failed to post login data: %s\n",
+			err.Error())}
 	}
 	defer resp.Body.Close()
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
+		return &Error{msg: fmt.Sprintf(
 			"Failed to read login response body: %s\n",
-			err.Error()))
-		log.Fatalf("Failed to read login response body: %s\n", err.Error())
+			err.Error())}
 	}
 
 	// A known error text upon failed login.
 	if strings.Contains(string(body),
 		"Error: Invalid username or password.") {
-		a.telegram.Send("Login failed: invalid username or password.")
-		log.Fatalln("Login failed: invalid username or password.")
+		return &Error{msg: "Login failed: invalid username or password."}
 	}
 
 	// If I can't see my username, then I am not logged in.
 	if !strings.Contains(string(body), viper.GetString("loginUsername")) {
-		a.telegram.Send("Login failed: can't find username in response body.")
-		log.Fatalln("Login failed: can't find username in response body.")
+		return &Error{msg: "Login failed: can't find username in response body."}
 	}
 
 	log.Println("Logged in.")
+
+	return nil
 }
 
-func (a *animeTorrents) maxPages() {
+func (a *animeTorrents) maxPages() error {
 	log.Println("Finding out torrents max page number.")
 	resp, err := a.client.Get(torrentsURL)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
-			"Failed to get the torrents page: %s\n", err.Error()))
-		log.Fatalf("Failed to get the torrents page: %s\n", err.Error())
+		return &Error{msg: fmt.Sprintf(
+			"Failed to get the torrents page: %s\n", err.Error())}
 	}
 	defer resp.Body.Close()
 
 	body, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
-		a.telegram.Send(fmt.Sprintf(
+		return &Error{msg: fmt.Sprintf(
 			"Failed to read torrents list response body: %s\n",
-			err.Error()))
-		log.Fatalf("Failed to read torrents list response body: %s\n", err.Error())
+			err.Error())}
 	}
 
 	re := regexp.MustCompile(`ajax/torrents_data\.php\?total=(\d+)&page=1`)
@@ -392,12 +421,14 @@ func (a *animeTorrents) maxPages() {
 	if len(match) > 1 && match[1] != "" {
 		total, err := strconv.Atoi(match[1])
 		if err != nil {
-			a.telegram.Send(fmt.Sprintf("Can't convert %d to int.", total))
-			log.Fatalf("Can't convert %d to int.", total)
+			return &Error{msg: fmt.Sprintf("Can't convert %d to int.",
+				total)}
 		}
 		log.Printf("Max pages figured out: %d.\n", total)
 		a.maxTorrentPages = total
 	}
+
+	return nil
 }
 
 func cleanTitle(dirtyTitle string) (cleanTitle string) {
