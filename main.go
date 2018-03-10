@@ -100,7 +100,7 @@ Create a config file named animetorrents-feed.json by filling in what is defined
 	}
 	flag.Parse()
 
-	viper.SetConfigName("animetorrents-feed")
+	viper.SetConfigName(fileBaseName)
 	viper.AddConfigPath(".")
 	err := viper.ReadInConfig()
 	if err != nil {
