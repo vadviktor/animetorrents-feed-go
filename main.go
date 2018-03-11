@@ -90,12 +90,12 @@ func init() {
 		filepath.Ext(os.Args[0]))
 
 	flag.Usage = func() {
-		u := `Logs into Animetorrents.me and gets the last 3 pages of torrents,
+		u := fmt.Sprintf(`Logs into Animetorrents.me and gets the last 3 pages of torrents,
 extracts their data and structures them in an Atom feed.
 That Atom feed is then uploaded to DigitalOcean Spaces.
 
-Create a config file named animetorrents-feed.json by filling in what is defined in its sample file.
-`
+Create a config file named %s.json by filling in what is defined in its sample file.
+`, fileBaseName)
 		fmt.Fprint(os.Stderr, u)
 	}
 	flag.Parse()
@@ -492,9 +492,10 @@ func putOnS3(filePath string) error {
 	defer file.Close()
 
 	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket:          aws.String(viper.GetString("doSpacesBucket")),
-		Key:             aws.String(viper.GetString("doSpacesObjectName")),
-		Body:            file,
+		Bucket: aws.String(viper.GetString("doSpacesBucket")),
+		Key:    aws.String(viper.GetString("doSpacesObjectName")),
+		Body:   file,
+		// https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
 		ACL:             aws.String("public-read"),
 		ContentType:     aws.String("application/atom+xml"),
 		ContentEncoding: aws.String("utf-8"),
