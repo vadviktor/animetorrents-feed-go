@@ -10,5 +10,6 @@
   "doSpacesEndpoint": "https://ams3.digitaloceanspaces.com",
   "doSpacesRegion": "eu-west-1",
   "doSpacesBucket": "",
-  "doSpacesObjectName": "feed.xml"
+  "doSpacesObjectName": "feed.xml",
+  "sentryDns": ""
 }
