@@ -115,17 +115,19 @@ Create a config file named %s.json by filling in what is defined in its sample f
 }
 
 func main() {
+	telegram := &telegram_msg.Telegram{}
+	telegram.Create(viper.GetString("botToken"), viper.GetInt("targetId"))
+
 	// Locking.
 	lockFile, err := lockfile.Lock()
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
 		log.Fatalf("%s\n", err.Error())
+		telegram.Send(err.Error())
 	}
 	defer os.Remove(lockFile)
 
-	s := &telegram_msg.Telegram{}
-	s.Create(viper.GetString("botToken"), viper.GetInt("targetId"))
-	//s.SendSilent("Begin to crawl.")
+	//telegram.SendSilent("Begin to crawl.")
 
 	// Parse HTML template once.
 	entryContentTemplate, err := template.New("content").Parse(`
@@ -138,6 +140,7 @@ func main() {
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
 		log.Printf("Failed to parse template: %s\n", err.Error())
+		telegram.Send(err.Error())
 		return
 	}
 
@@ -160,16 +163,16 @@ func main() {
 	if err != nil {
 		log.Printf("%s\n", err.Error())
 		raven.CaptureErrorAndWait(err, nil)
-		s.Send(err.Error())
+		telegram.Send(err.Error())
 		return
 	}
 
-	a.telegram = s
+	a.telegram = telegram
 	err = a.login()
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
 		log.Printf("%s\n", err.Error())
-		s.Send(err.Error())
+		telegram.Send(err.Error())
 		return
 	}
 
@@ -177,7 +180,7 @@ func main() {
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
 		log.Printf("%s\n", err.Error())
-		s.Send(err.Error())
+		telegram.Send(err.Error())
 		return
 	}
 
@@ -189,7 +192,7 @@ func main() {
 		if err != nil {
 			raven.CaptureErrorAndWait(err, nil)
 			log.Printf("%s\n", err.Error())
-			a.telegram.Send(err.Error())
+			telegram.Send(err.Error())
 			return
 		}
 
@@ -220,7 +223,7 @@ func main() {
 			if err != nil {
 				raven.CaptureErrorAndWait(err, nil)
 				log.Printf("%s\n", err.Error())
-				a.telegram.Send(err.Error())
+				telegram.Send(err.Error())
 				return
 			}
 
@@ -233,7 +236,7 @@ func main() {
 	err = ioutil.WriteFile(tempFeedFile, feed.Build(), 0644)
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
-		s.Send(fmt.Sprintf(
+		telegram.Send(fmt.Sprintf(
 			"Failed to write to output file: %s", err.Error()))
 		log.Printf("Failed to write to output file: %s\n", err.Error())
 
@@ -244,13 +247,13 @@ func main() {
 	err = putOnS3(tempFeedFile)
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
-		s.Send(fmt.Sprintf("Failure during uploading file to S3: %s", err.Error()))
+		telegram.Send(fmt.Sprintf("Failure during uploading file to S3: %s", err.Error()))
 		log.Printf("Failure during uploading file to S3: %s\n", err.Error())
 
 		return
 	}
 
-	s.SendSilent("Atom feed is ready.")
+	telegram.SendSilent("Atom feed is ready.")
 	log.Println("Script finished.")
 }
 
@@ -307,7 +310,7 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 		blogForm := "2 Jan, 2006 [3:04 pm]"
 		t, err := time.Parse(blogForm, updatedMatch[1])
 		if err != nil {
-			a.telegram.Send(fmt.Sprintf("unable to parse time format: %s", err.Error()))
+			a.telegram.Send(fmt.Sprintf("Unable to parse time format: %s", err.Error()))
 			feedItem.Updated = time.Now().Format(time.RFC3339)
 		} else {
 			feedItem.Updated = t.Format(time.RFC3339)
@@ -419,7 +422,7 @@ func (a *animeTorrents) maxPages() error {
 	log.Println("Finding out torrents max page number.")
 	resp, err := a.client.Get(torrentsURL)
 	if err != nil {
-		return fmt.Errorf("failed to get the torrents page: %s\n",
+		return fmt.Errorf("failed to get the torrents page: %s",
 			err.Error())
 	}
 	defer resp.Body.Close()
@@ -460,7 +463,7 @@ func (f *atomFeed) Build() []byte {
 	b.WriteString(fmt.Sprintf(`<updated>%s</updated>`, f.Updated))
 	b.WriteString(fmt.Sprintf(`<id>%s</id>`, f.Link))
 	b.WriteString(fmt.Sprintf(`<link href="%s" rel="self" />`, f.Link))
-	b.WriteString(fmt.Sprintf(`<generator>Go 1.9</generator>`))
+	b.WriteString(fmt.Sprintf(`<generator>Golang</generator>`))
 	b.WriteString(`<author>`)
 	b.WriteString(fmt.Sprintf(`<name>%s</name>`, f.Author.Name))
 	b.WriteString(fmt.Sprintf(`<uri>%s</uri>`, f.Author.URI))
