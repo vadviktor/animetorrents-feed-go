@@ -122,8 +122,8 @@ func main() {
 	lockFile, err := lockfile.Lock()
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
-		log.Fatalf("%s\n", err.Error())
 		telegram.Send(err.Error())
+		log.Fatalf("%s\n", err.Error())
 	}
 	defer os.Remove(lockFile)
 
