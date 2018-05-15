@@ -78,6 +78,7 @@ type Error struct {
 func (e *Error) Error() string { return e.msg }
 
 var (
+	telegram                 = &telegram_msg.Telegram{}
 	regexpTorrentRows        = regexp.MustCompile(`(?mU)<tr class="data(Odd|Even)[\s\S]*<a[\s\w\W]+title="(?P<category>.+)"[\s\S]+<a href="(?P<url>.+)"[\s\S]+<strong>(?P<title>.+)</a>`)
 	regexpImgTag             = regexp.MustCompile(`<img.+/>`)
 	regexpExcludedCategories = regexp.MustCompile(`(Manga|Novel|Doujin)`)
@@ -89,8 +90,6 @@ var (
 )
 
 func init() {
-	raven.SetDSN(viper.GetString("sentryDns"))
-
 	fileBaseName = strings.TrimRight(filepath.Base(os.Args[0]),
 		filepath.Ext(os.Args[0]))
 
@@ -109,13 +108,13 @@ Create a config file named %s.json by filling in what is defined in its sample f
 	viper.AddConfigPath(".")
 	err := viper.ReadInConfig()
 	if err != nil {
-		raven.CaptureErrorAndWait(err, nil)
 		log.Fatalf("%s\n", err.Error())
 	}
+
+	raven.SetDSN(viper.GetString("sentryDns"))
 }
 
 func main() {
-	telegram := &telegram_msg.Telegram{}
 	telegram.Create(viper.GetString("botToken"), viper.GetInt("targetId"))
 
 	// Locking.
