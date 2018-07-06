@@ -23,8 +23,10 @@ import (
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/awserr"
 	"github.com/aws/aws-sdk-go/aws/credentials"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3manager"
 	"github.com/getsentry/raven-go"
 	"github.com/sethgrid/pester"
@@ -310,7 +312,7 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry,
 	coverImageUrlMatch := regexpCoverImageUrl.FindStringSubmatch(bodyText)
 	coverImageUrl, err := putImageOnS3(s3, coverImageUrlMatch[1])
 	if err != nil {
-		return fmt.Errorf("failed to upload image to s3: %s", err.Error())
+		return fmt.Errorf("failed to upload image: %s", err.Error())
 	}
 
 	// Screenshot processing.
@@ -321,7 +323,7 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry,
 		screenShots[path.Base(u)] = make(map[string]string)
 		screenShots[path.Base(u)]["large"], err = putImageOnS3(s3, u)
 		if err != nil {
-			return fmt.Errorf("failed to upload image to s3: %s", err.Error())
+			return fmt.Errorf("failed to upload image: %s", err.Error())
 		}
 	}
 	screenshotsSmallMatch := regexpScreenShotsSmall.FindAllSubmatch(body, -1)
@@ -330,7 +332,7 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry,
 		screenShots[path.Base(u)] = make(map[string]string)
 		screenShots[path.Base(u)]["small"], err = putImageOnS3(s3, u)
 		if err != nil {
-			return fmt.Errorf("failed to upload image to s3: %s", err.Error())
+			return fmt.Errorf("failed to upload image: %s", err.Error())
 		}
 	}
 
@@ -563,13 +565,16 @@ func putFeedOnS3(s3Session *session.Session, filePath string) error {
 }
 
 // putImageOnS3 downloads the image from the url, stores it in S3,
-// then returns the S3 url for that image
-func putImageOnS3(s3 *session.Session, url string) (string, error) {
+// then returns the S3 url for that image.
+// The image will be checked first and only uploaded if it does not already
+// exist.
+// There is a builtin backoff retry added for SlowDown errors.
+func putImageOnS3(s3Session *session.Session, url string) (string, error) {
 	log.Printf("Uploading %s to S3.\n", url)
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("couldn't download image from url: %s/n%s",
+		return "", fmt.Errorf("IMG - couldn't download image from url: %s/n%s",
 			url, err.Error())
 	}
 	defer resp.Body.Close()
@@ -580,14 +585,52 @@ func putImageOnS3(s3 *session.Session, url string) (string, error) {
 		viper.GetString("digitalocean.spacesImagePrefix"),
 		p[len(p)-3], p[len(p)-2], p[len(p)-1])
 
-	uploader := s3manager.NewUploader(s3)
-	_, err = uploader.Upload(&s3manager.UploadInput{
+	svc := s3.New(s3Session)
+	result, err := svc.HeadObject(&s3.HeadObjectInput{
 		Bucket: aws.String(viper.GetString("digitalocean.spacesBucket")),
 		Key:    aws.String(key),
-		Body:   resp.Body,
-		// https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
-		ACL: aws.String("public-read"),
 	})
+	if err == nil {
+		log.Printf("image already exists with size of %d bytes\n",
+			result.ContentLength)
+
+		newUrl := fmt.Sprintf("%s/%s",
+		viper.GetString("digitalocean.spacesBaseUrl"), key)
+		return newUrl, err
+	}
+
+	backoffSleep := 1
+	maxRetry := 5
+	uploader := s3manager.NewUploader(s3Session)
+	for retryCounter := 1; retryCounter <= maxRetry; retryCounter++ {
+		time.Sleep(time.Second * time.Duration(backoffSleep))
+		_, err = uploader.Upload(&s3manager.UploadInput{
+			Bucket: aws.String(viper.GetString("digitalocean.spacesBucket")),
+			Key:    aws.String(key),
+			Body:   resp.Body,
+			// https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
+			ACL: aws.String("public-read"),
+		})
+
+		// https://github.com/aws/aws-sdk-go/blob/master/example/aws/request/handleServiceErrorCodes/handleServiceErrorCodes.go#L52:30
+		if aerr, ok := err.(awserr.Error); ok {
+			switch aerr.Code() {
+			case "SlowDown":
+				if retryCounter == maxRetry {
+					return "", fmt.Errorf("s3 - %s", err.Error())
+				}
+
+				// Got a slow down message, need to retry.
+				backoffSleep += 1
+				continue
+			default:
+				return "", fmt.Errorf("s3 - %s", err.Error())
+			}
+		}
+
+		// No error, we can quit the loop.
+		break
+	}
 
 	newUrl := fmt.Sprintf("%s/%s",
 		viper.GetString("digitalocean.spacesBaseUrl"), key)
