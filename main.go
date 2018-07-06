@@ -14,6 +14,7 @@ import (
 	"net/http/cookiejar"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -49,6 +50,7 @@ type animeTorrents struct {
 // atomFeed is the main body of the Atom feed structure.
 type atomFeed struct {
 	Author  feedPerson
+	Id      string
 	Title   string
 	Updated string
 	Link    string
@@ -57,6 +59,7 @@ type atomFeed struct {
 
 // feedEntry represents a single article in a feed.
 type feedEntry struct {
+	Id       string
 	Updated  string
 	Title    string
 	Link     string
@@ -79,17 +82,20 @@ func (e *Error) Error() string { return e.msg }
 
 var (
 	telegram                 = &telegram_msg.Telegram{}
-	regexpTorrentRows        = regexp.MustCompile(`(?mU)<tr class="data(Odd|Even)[\s\S]*<a[\s\w\W]+title="(?P<category>.+)"[\s\S]+<a href="(?P<url>.+)"[\s\S]+<strong>(?P<title>.+)</a>`)
-	regexpImgTag             = regexp.MustCompile(`<img.+/>`)
+	regexpTorrentRows        = regexp.MustCompile(`(?m)<tr class="data(Odd|Even)[\s\S]*?<a[\s\w\W]+?title="(?P<category>.+?)"[\s\S]+?<a href="(?P<url>.+?)"[\s\S]+?<strong>(?P<title>.+?)</a>`)
+	regexpImgTag             = regexp.MustCompile(`<img.+?/>`)
 	regexpExcludedCategories = regexp.MustCompile(`(Manga|Novel|Doujin)`)
-	regexpPlot               = regexp.MustCompile(`<div id="torDescription">[\s\w\W]*</div>`)
-	regexpCoverImage         = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/covers/.*/>`)
-	regexpScreenShots        = regexp.MustCompile(`<img src="https://animetorrents\.me/imghost/screenthumb/.*/>`)
-	regexpEntryUpdated       = regexp.MustCompile(`<span class="blogDate">(.*])</span>`)
+	regexpPlot               = regexp.MustCompile(`<div id="torDescription">[\s\w\W]*?</div>`)
+	regexpCoverImageUrl      = regexp.MustCompile(`src="(https://animetorrents\.me/imghost/covers/.+?)"`)
+	regexpScreenShotsSmall   = regexp.MustCompile(`src="(https://animetorrents\.me/imghost/screenthumb/.+?)"`)
+	regexpScreenShotsLarge   = regexp.MustCompile(`href="(https://animetorrents\.me/imghost/screens/.+?)"`)
+	regexpEntryUpdated       = regexp.MustCompile(`<span class="blogDate">(.*?])</span>`)
 	fileBaseName             string
 )
 
 func init() {
+	raven.SetDSN("https://f9af5d4b88bb4df1a182849a4387c61e:efeeca97b5dc4ef0b485c81651d183ce@sentry.io/1078203")
+
 	fileBaseName = strings.TrimRight(filepath.Base(os.Args[0]),
 		filepath.Ext(os.Args[0]))
 
@@ -108,14 +114,14 @@ Create a config file named %s.json by filling in what is defined in its sample f
 	viper.AddConfigPath(".")
 	err := viper.ReadInConfig()
 	if err != nil {
+		raven.CaptureErrorAndWait(err, nil)
 		log.Fatalf("%s\n", err.Error())
 	}
-
-	raven.SetDSN(viper.GetString("sentryDns"))
 }
 
 func main() {
-	telegram.Create(viper.GetString("botToken"), viper.GetInt("targetId"))
+	telegram.Create(viper.GetString("telegram.botToken"),
+		viper.GetInt("telegram.targetId"))
 
 	// Locking.
 	lockFile, err := lockfile.Lock()
@@ -130,11 +136,15 @@ func main() {
 
 	// Parse HTML template once.
 	entryContentTemplate, err := template.New("content").Parse(`
-		{{.CoverImage}}
+		<img src="{{.CoverImageUrl}}" />
 		<p>[{{.Category}}]</p>
 		<p><a href="{{.AbsoluteLink}}" target="blank">{{.AbsoluteLink}}</a></p>
 		{{.Plot}}
-		{{.Screenshots}}
+		{{range .Screenshots}}
+		<a href="{{ .large }}">
+        <img src="{{ .small }}" width="200" height="100" />"
+    </a>
+		{{end}}
 	`)
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
@@ -144,17 +154,33 @@ func main() {
 	}
 
 	feed := &atomFeed{
+		Id:      "vadviktor.xyz",
 		Updated: time.Now().Format(time.RFC3339),
 		Link: fmt.Sprintf("https://s3-%s.amazonaws.com/%s/%s",
-			viper.GetString("doSpacesRegion"),
-			viper.GetString("doSpacesBucket"),
-			viper.GetString("doSpacesObjectName")),
+			viper.GetString("digitalocean.spacesRegion"),
+			viper.GetString("digitalocean.spacesBucket"),
+			viper.GetString("digitalocean.spacesObjectName")),
 		Author: feedPerson{
 			Name:  "Viktor (Ikon) VAD",
 			Email: "vad.viktor@gmail.com",
 			URI:   "https://www.github.com/vadviktor",
 		},
 		Title: "Animetorrents.me feed",
+	}
+
+	s3Session, err := session.NewSession(&aws.Config{
+		Endpoint: aws.String(viper.GetString("digitalocean.spacesEndpoint")),
+		Region:   aws.String(viper.GetString("digitalocean.spacesRegion")),
+		Credentials: credentials.NewStaticCredentials(
+			viper.GetString("digitalocean.spacesKey"),
+			viper.GetString("digitalocean.spacesSecret"),
+			""),
+	})
+	if err != nil {
+		log.Printf("%s\n", err.Error())
+		raven.CaptureErrorAndWait(err, nil)
+		telegram.Send(err.Error())
+		return
 	}
 
 	a := &animeTorrents{}
@@ -212,13 +238,14 @@ func main() {
 			feedItem := &feedEntry{
 				Title:    cleanTitle(results["title"]),
 				Link:     results["url"],
+				Id:       results["url"],
 				Category: results["category"],
 			}
 
 			// Get the profile for each selected item.
 			time.Sleep(random(1, viper.GetInt("antiHammerMaxSleep")) * time.Second)
 			log.Printf("Reading torrent profile: %s\n", results["url"])
-			err := a.parseProfile(feedItem, results, entryContentTemplate)
+			err := a.parseProfile(feedItem, results, entryContentTemplate, s3Session)
 			if err != nil {
 				raven.CaptureErrorAndWait(err, nil)
 				log.Printf("%s\n", err.Error())
@@ -243,10 +270,11 @@ func main() {
 	}
 	defer os.Remove(tempFeedFile)
 
-	err = putOnS3(tempFeedFile)
+	err = putFeedOnS3(s3Session, tempFeedFile)
 	if err != nil {
 		raven.CaptureErrorAndWait(err, nil)
-		telegram.Send(fmt.Sprintf("Failure during uploading file to S3: %s", err.Error()))
+		telegram.Send(fmt.Sprintf("Failure during uploading file to S3: %s",
+			err.Error()))
 		log.Printf("Failure during uploading file to S3: %s\n", err.Error())
 
 		return
@@ -258,8 +286,9 @@ func main() {
 
 // parseProfile extracts the content from the torrent profile and fills in the
 // entry fields.
-func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[string]string,
-	tpl *template.Template) error {
+func (a *animeTorrents) parseProfile(feedItem *feedEntry,
+		torrentRowInfo map[string]string, tpl *template.Template,
+		s3 *session.Session) error {
 	resp, err := a.client.Get(torrentRowInfo["url"])
 	if err != nil {
 		return fmt.Errorf(
@@ -277,21 +306,46 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 
 	// Content.
 	plotMatch := regexpPlot.FindString(bodyText)
-	coverImageMatch := regexpCoverImage.FindString(bodyText)
-	screenshotsMatch := regexpScreenShots.FindString(bodyText)
+
+	coverImageUrlMatch := regexpCoverImageUrl.FindStringSubmatch(bodyText)
+	coverImageUrl, err := putImageOnS3(s3, coverImageUrlMatch[1])
+	if err != nil {
+		return fmt.Errorf("failed to upload image to s3: %s", err.Error())
+	}
+
+	// Screenshot processing.
+	var screenShots = map[string]map[string]string{}
+	screenshotsLargeMatch := regexpScreenShotsLarge.FindAllSubmatch(body, -1)
+	for _, m := range screenshotsLargeMatch {
+		u := string(m[1])
+		screenShots[path.Base(u)] = make(map[string]string)
+		screenShots[path.Base(u)]["large"], err = putImageOnS3(s3, u)
+		if err != nil {
+			return fmt.Errorf("failed to upload image to s3: %s", err.Error())
+		}
+	}
+	screenshotsSmallMatch := regexpScreenShotsSmall.FindAllSubmatch(body, -1)
+	for _, m := range screenshotsSmallMatch {
+		u := string(m[1])
+		screenShots[path.Base(u)] = make(map[string]string)
+		screenShots[path.Base(u)]["small"], err = putImageOnS3(s3, u)
+		if err != nil {
+			return fmt.Errorf("failed to upload image to s3: %s", err.Error())
+		}
+	}
 
 	data := struct {
-		CoverImage   string
-		Category     string
-		AbsoluteLink string
-		Plot         string
-		Screenshots  string
+		CoverImageUrl string
+		Category      string
+		AbsoluteLink  string
+		Plot          string
+		Screenshots   map[string]map[string]string
 	}{
-		CoverImage:   coverImageMatch,
-		Category:     torrentRowInfo["category"],
-		AbsoluteLink: torrentRowInfo["url"],
-		Plot:         plotMatch,
-		Screenshots:  screenshotsMatch,
+		CoverImageUrl: coverImageUrl,
+		Category:      torrentRowInfo["category"],
+		AbsoluteLink:  torrentRowInfo["url"],
+		Plot:          plotMatch,
+		Screenshots:   screenShots,
 	}
 
 	contentFromTpl := new(bytes.Buffer)
@@ -309,7 +363,8 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry, torrentRowInfo map[str
 		blogForm := "2 Jan, 2006 [3:04 pm]"
 		t, err := time.Parse(blogForm, updatedMatch[1])
 		if err != nil {
-			a.telegram.Send(fmt.Sprintf("Unable to parse time format: %s", err.Error()))
+			a.telegram.Send(fmt.Sprintf("Unable to parse time format: %s",
+				err.Error()))
 			feedItem.Updated = time.Now().Format(time.RFC3339)
 		} else {
 			feedItem.Updated = t.Format(time.RFC3339)
@@ -456,27 +511,27 @@ func cleanTitle(dirtyTitle string) (cleanTitle string) {
 // Build will put the feed data together into an Atom feed structure.
 func (f *atomFeed) Build() []byte {
 	var b bytes.Buffer
-	b.WriteString(`<?xml version='1.0' encoding='UTF-8'?>
-<feed xmlns="http://www.w3.org/2005/Atom">`)
-	b.WriteString(fmt.Sprintf(`<title>%s</title>`, f.Title))
-	b.WriteString(fmt.Sprintf(`<updated>%s</updated>`, f.Updated))
-	b.WriteString(fmt.Sprintf(`<id>%s</id>`, f.Link))
-	b.WriteString(fmt.Sprintf(`<link href="%s" rel="self" />`, f.Link))
-	b.WriteString(fmt.Sprintf(`<generator>Golang</generator>`))
-	b.WriteString(`<author>`)
-	b.WriteString(fmt.Sprintf(`<name>%s</name>`, f.Author.Name))
-	b.WriteString(fmt.Sprintf(`<uri>%s</uri>`, f.Author.URI))
-	b.WriteString(fmt.Sprintf(`<email>%s</email>`, f.Author.Email))
-	b.WriteString(`</author>`)
+	b.WriteString("<?xml version='1.0' encoding='UTF-8'?>\n")
+	b.WriteString("<feed xmlns=\"http://www.w3.org/2005/Atom\">\n")
+	b.WriteString(fmt.Sprintf("<title>%s</title>\n", f.Title))
+	b.WriteString(fmt.Sprintf("<updated>%s</updated>\n", f.Updated))
+	b.WriteString(fmt.Sprintf("<id>%s</id>\n", f.Link))
+	b.WriteString(fmt.Sprintf("<link href=\"%s\" rel=\"self\" />\n", f.Link))
+	b.WriteString(fmt.Sprintf("<generator>Golang</generator>\n"))
+	b.WriteString("<author>\n")
+	b.WriteString(fmt.Sprintf("<name>%s</name>\n", f.Author.Name))
+	b.WriteString(fmt.Sprintf("<uri>%s</uri>\n", f.Author.URI))
+	b.WriteString(fmt.Sprintf("<email>%s</email>\n", f.Author.Email))
+	b.WriteString("</author>\n")
 
 	for _, e := range f.Entry {
-		b.WriteString(fmt.Sprintf(`<entry>`))
-		b.WriteString(fmt.Sprintf(`<title>%s</title>`, e.Title))
-		b.WriteString(fmt.Sprintf(`<link href="%s" rel="self" />`, e.Link))
-		b.WriteString(fmt.Sprintf(`<id>%s</id>`, e.Link))
-		b.WriteString(fmt.Sprintf(`<updated>%s</updated>`, e.Updated))
-		b.WriteString(fmt.Sprintf(`<content type="html">%s</content>`, e.Content))
-		b.WriteString(fmt.Sprintf(`</entry>`))
+		b.WriteString(fmt.Sprintf("<entry>\n"))
+		b.WriteString(fmt.Sprintf("<title>%s</title>\n", e.Title))
+		b.WriteString(fmt.Sprintf("<link href=\"%s\" rel=\"self\" />\n", e.Link))
+		b.WriteString(fmt.Sprintf("<id>%s</id>\n", e.Link))
+		b.WriteString(fmt.Sprintf("<updated>%s</updated>\n", e.Updated))
+		b.WriteString(fmt.Sprintf("<content type=\"html\">%s</content>\n", e.Content))
+		b.WriteString(fmt.Sprintf("</entry>\n"))
 	}
 
 	b.WriteString(`</feed>`)
@@ -484,21 +539,8 @@ func (f *atomFeed) Build() []byte {
 	return b.Bytes()
 }
 
-func putOnS3(filePath string) error {
-	sess, err := session.NewSession(&aws.Config{
-		Endpoint: aws.String(viper.GetString("doSpacesEndpoint")),
-		Region:   aws.String(viper.GetString("doSpacesRegion")),
-		Credentials: credentials.NewStaticCredentials(
-			viper.GetString("doSpacesKey"),
-			viper.GetString("doSpacesSecret"),
-			""),
-	})
-	if err != nil {
-		return err
-	}
-
-	// upload
-	uploader := s3manager.NewUploader(sess)
+func putFeedOnS3(s3Session *session.Session, filePath string) error {
+	log.Printf("Uploading %s to S3.\n", filePath)
 
 	file, err := os.Open(filePath)
 	if err != nil {
@@ -506,9 +548,10 @@ func putOnS3(filePath string) error {
 	}
 	defer file.Close()
 
+	uploader := s3manager.NewUploader(s3Session)
 	_, err = uploader.Upload(&s3manager.UploadInput{
-		Bucket: aws.String(viper.GetString("doSpacesBucket")),
-		Key:    aws.String(viper.GetString("doSpacesObjectName")),
+		Bucket: aws.String(viper.GetString("digitalocean.spacesBucket")),
+		Key:    aws.String(viper.GetString("digitalocean.spacesObjectName")),
 		Body:   file,
 		// https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
 		ACL:             aws.String("public-read"),
@@ -517,6 +560,38 @@ func putOnS3(filePath string) error {
 	})
 
 	return err
+}
+
+// putImageOnS3 downloads the image from the url, stores it in S3,
+// then returns the S3 url for that image
+func putImageOnS3(s3 *session.Session, url string) (string, error) {
+	log.Printf("Uploading %s to S3.\n", url)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return "", fmt.Errorf("couldn't download image from url: %s/n%s",
+			url, err.Error())
+	}
+	defer resp.Body.Close()
+
+	p := strings.Split(url, "/")
+	// image key e.g.: prefix/2017/02/coverimg.jpg
+	key := fmt.Sprintf("%s/%s/%s/%s",
+		viper.GetString("digitalocean.spacesImagePrefix"),
+		p[len(p)-3], p[len(p)-2], p[len(p)-1])
+
+	uploader := s3manager.NewUploader(s3)
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(viper.GetString("digitalocean.spacesBucket")),
+		Key:    aws.String(key),
+		Body:   resp.Body,
+		// https://docs.aws.amazon.com/AmazonS3/latest/dev/acl-overview.html#canned-acl
+		ACL: aws.String("public-read"),
+	})
+
+	newUrl := fmt.Sprintf("%s/%s",
+		viper.GetString("digitalocean.spacesBaseUrl"), key)
+	return newUrl, err
 }
 
 func random(min, max int) time.Duration {

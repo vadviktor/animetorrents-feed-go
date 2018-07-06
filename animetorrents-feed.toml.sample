@@ -1,0 +1,13 @@
+loginUsername = ""
+loginPassword = ""
+torrentPagesToScan = 3
+antiHammerMaxSleep = 5
+botToken = ""
+targetId = 0
+doSpacesKey = ""
+doSpacesSecret = ""
+doSpacesEndpoint = "https://ams3.digitaloceanspaces.com"
+doSpacesRegion = "eu-west-1"
+doSpacesBucket = ""
+doSpacesObjectName = "feed.xml"
+doImageDirectory = "

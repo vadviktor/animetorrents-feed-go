@@ -1,5 +1,5 @@
 rss.xml
-animetorrents-feed.json
+animetorrents-feed.toml
 builds/
 *.lock
 /vendor/
