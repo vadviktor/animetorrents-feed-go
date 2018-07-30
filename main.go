@@ -574,7 +574,7 @@ func putImageOnS3(s3Session *session.Session, url string) (string, error) {
 
 	resp, err := http.Get(url)
 	if err != nil {
-		return "", fmt.Errorf("IMG - couldn't download image from url: %s/n%s",
+		return "", fmt.Errorf("IMG - couldn't download image from url: %s\n%s",
 			url, err.Error())
 	}
 	defer resp.Body.Close()
