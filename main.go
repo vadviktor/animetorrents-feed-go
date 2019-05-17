@@ -289,8 +289,8 @@ func main() {
 // parseProfile extracts the content from the torrent profile and fills in the
 // entry fields.
 func (a *animeTorrents) parseProfile(feedItem *feedEntry,
-		torrentRowInfo map[string]string, tpl *template.Template,
-		s3 *session.Session) error {
+	torrentRowInfo map[string]string, tpl *template.Template,
+	s3 *session.Session) error {
 	resp, err := a.client.Get(torrentRowInfo["url"])
 	if err != nil {
 		return fmt.Errorf(
@@ -310,9 +310,16 @@ func (a *animeTorrents) parseProfile(feedItem *feedEntry,
 	plotMatch := regexpPlot.FindString(bodyText)
 
 	coverImageUrlMatch := regexpCoverImageUrl.FindStringSubmatch(bodyText)
-	coverImageUrl, err := putImageOnS3(s3, coverImageUrlMatch[1])
-	if err != nil {
-		return fmt.Errorf("failed to upload image: %s", err.Error())
+	if coverImageUrlMatch == nil {
+		raven.CaptureMessageAndWait("could not find cover image", nil)
+	}
+
+	coverImageUrl := ""
+	if coverImageUrlMatch != nil {
+		coverImageUrl, err = putImageOnS3(s3, coverImageUrlMatch[1])
+		if err != nil {
+			return fmt.Errorf("failed to upload image: %s", err.Error())
+		}
 	}
 
 	// Screenshot processing.
@@ -595,7 +602,7 @@ func putImageOnS3(s3Session *session.Session, url string) (string, error) {
 			result.ContentLength)
 
 		newUrl := fmt.Sprintf("%s/%s",
-		viper.GetString("digitalocean.spacesBaseUrl"), key)
+			viper.GetString("digitalocean.spacesBaseUrl"), key)
 		return newUrl, err
 	}
 
